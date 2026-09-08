@@ -1177,7 +1177,6 @@ function App() {
             {canShare ? <Share size={18} /> : copied ? <Check size={18} /> : <Link size={18} />}
             <span>{canShare ? t("share") : copied ? t("copied") : t("copy")}</span>
           </button>
-          <small>{t("shareNetwork")}</small>
         </Sheet>
       )}
     </>
@@ -1212,7 +1211,6 @@ function App() {
             </div>
             <footer>
               <span>{t("footerPrivacy")}</span>
-              <a href="/local-ca.cer">{t("footerCert")}</a>
             </footer>
           </div>
         </main>
@@ -1335,7 +1333,6 @@ function App() {
           {!session && (
             <footer>
               <span>{t("footerPrivacy")}</span>
-              <a href="/local-ca.cer">{t("footerCert")}</a>
             </footer>
           )}
         </div>
