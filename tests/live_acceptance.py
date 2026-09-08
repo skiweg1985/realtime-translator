@@ -39,9 +39,10 @@ async def main():
         await speaker.send('stop')
         await asyncio.wait_for(asyncio.gather(*tasks),25)
     for output in events:
+        assert not any(e['type']=='notice' for e in output), [e.get('message') for e in output if e['type']=='notice']
         assert any(e['type']=='audio' for e in output), 'No translated audio'
         assert any(e['type']=='translation' and e['text'] for e in output), 'No translation text'
-        assert any(e['type']=='original' and e['text'] for e in output), 'No local source caption'
+        assert any(e['type']=='original' and e['text'] for e in output), 'No cloud source caption'
         assert not any(e['type']=='error' for e in output), 'Upstream error'
     atext=[e['text'] for e in events[0] if e['type']=='translation'][-1]
     btext=[e['text'] for e in events[1] if e['type']=='translation'][-1]

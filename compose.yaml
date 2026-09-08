@@ -3,10 +3,6 @@ services:
   app:
     build: .
     env_file: .env
-    environment:
-      HF_HOME: /models
-    volumes:
-      - models:/models
     restart: unless-stopped
     healthcheck:
       test:
@@ -31,5 +27,3 @@ services:
       app:
         condition: service_healthy
     restart: unless-stopped
-volumes:
-  models:
