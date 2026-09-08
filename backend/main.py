@@ -96,6 +96,28 @@ def create_room(body: NewRoom, request: Request):
     rooms[room_id] = Room(owner=owner, language=body.language, source=body.source, code=code)
     return {'id': room_id, 'owner': owner, 'code': code}
 
+class EndRoom(BaseModel):
+    owner: str = ''
+
+@app.post('/api/rooms/{room_id}/end')
+async def end_room(room_id: str, body: EndRoom, request: Request):
+    """The speaker ends the session for everyone: listeners get a final status, the room disappears."""
+    origin = request.headers.get('origin')
+    if origin and origin.split('://', 1)[-1] != request.headers.get('host'):
+        raise HTTPException(403, 'Origin rejected')
+    room = rooms.get(room_id)
+    if not room or not secrets.compare_digest(str(body.owner), room.owner):
+        raise HTTPException(404, 'Diese Sitzung ist nicht mehr verfügbar.')
+    if room.active:
+        raise HTTPException(409, 'Bitte zuerst die Übertragung stoppen.')
+    del rooms[room_id]
+    await broadcast(room, {'type': 'status', 'status': 'closed'})
+    await asyncio.sleep(.1)
+    for peer in list(room.peers):
+        with contextlib.suppress(Exception):
+            await peer.ws.close(code=1000)
+    return {'ok': True}
+
 def new_code():
     """Four spoken digits, unique among current rooms, never starting with zero."""
     used = {room.code for room in rooms.values()}

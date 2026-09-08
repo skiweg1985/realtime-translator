@@ -1,4 +1,4 @@
-/* Translate Live · Untertitel-Konsole: Typografie, eine Übersetzungslinie, flache Flächen. Mobile-first. */
+/* SONA Live · Untertitel-Konsole: Typografie, eine Übersetzungslinie, flache Flächen. Mobile-first. */
 @import "./tokens.css";
 
 *,
@@ -173,10 +173,49 @@ main {
 }
 
 /* Startseite: eine Zeile, zwei große Wege */
-.is-home .intro {
-  margin-top: auto;
-  font-size: var(--text-md);
+.is-home .topbar {
+  justify-content: flex-end;
+}
+/* Startseite: Produktname oben, die zwei Aktionen unten in der Daumenzone. */
+.identity {
+  padding-top: var(--space-2);
+}
+/* Stimmlinie im Leerraum: wie gedruckt, keine Bewegung im Leerlauf. */
+.voice-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  margin: 0 calc(-1 * var(--space-5));
+}
+.voice {
+  display: block;
+  width: 100%;
+  height: 120px;
+  color: var(--line-strong);
+}
+.voice path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+.identity-name {
+  display: block;
+  font-size: calc(var(--text-lg) * 1.7);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.03em;
   color: var(--ink);
+}
+.identity-desc {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--ink-2);
+}
+.is-home .column {
+  padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom));
 }
 .choices {
   display: grid;
@@ -323,6 +362,7 @@ button.lang:active {
 .route.waiting .route-line,
 .route.connecting .route-line,
 .route.ended .route-line,
+.route.closed .route-line,
 .route.error .route-line,
 .route.draining .route-line {
   background: repeating-linear-gradient(
@@ -336,8 +376,32 @@ button.lang:active {
   animation: march 0.5s linear infinite;
 }
 .route.ended .route-line,
+.route.closed .route-line,
 .route.idle .route-line {
   opacity: 0.55;
+}
+/* Zwischenzustand: Pause, Ende oder kein Sprecher, als Text statt als Karte. */
+.standby {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--line);
+}
+.standby strong {
+  display: block;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.standby span {
+  display: block;
+  margin-top: 4px;
+  max-width: 40ch;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.standby.closed strong {
+  font-size: calc(var(--text-lg) * 1.2);
 }
 
 /* Textzeilen */
