@@ -15,6 +15,18 @@ docker compose up -d --build
 
 Open `https://YOUR_LAN_IP:8443` on devices on the same network. Allow microphone access, choose the source/target languages and tap **Sprechen starten**. Share the listener link using the link button. Listeners tap **Live zuhören** to enable audio playback. Headphones and AirPods use the device's selected audio route; available microphone choices appear after microphone permission. Keep Safari open and the phone unlocked; background audio capture is not guaranteed.
 
+## Develop the frontend
+
+With the Compose stack running, start the Vite dev server for live reload:
+
+```sh
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The dev server proxies `/api` and the WebSocket to the HTTPS stack on port 8443, so the full speaker and listener flow works on `localhost` without installing the certificate. Rebuild the container to ship the result.
+
 ## Trust HTTPS on iPhone
 
 1. Open `http://YOUR_LAN_IP:8080/local-ca.cer` in Safari. This HTTP port serves only the public certificate.
