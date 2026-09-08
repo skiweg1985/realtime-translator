@@ -872,6 +872,12 @@ function App() {
       socket.current?.send("stop");
     }
   }
+  /* Rauschunterdrückung auch mitten in der Sitzung: das Backend baut die Kanäle in der nächsten Pause neu auf. */
+  function chooseNoise(value: string) {
+    setNoise(value);
+    if (!listener && status === "live" && socket.current?.readyState === WebSocket.OPEN)
+      socket.current.send(JSON.stringify({ type: "settings", noise_reduction: value }));
+  }
   /* Mikrofon stumm: Track aus, fünf Sekunden Stille nachschieben, dann nichts mehr senden. */
   function setMic(on: boolean) {
     micOff.current = !on;
@@ -1229,7 +1235,7 @@ function App() {
       )}
       {sheet === "device" && (
         <Sheet title={t("micUnnamed")} closeLabel={t("close")} onClose={() => setSheet(null)}>
-          {devices.length > 1 && (
+          {devices.length > 1 && !active && (
             <div className="options" role="radiogroup" aria-label={t("micUnnamed")}>
               <Option label={t("micDefault")} selected={device === ""} onSelect={() => setDevice("")} />
               {devices.map((d) => (
@@ -1256,7 +1262,7 @@ function App() {
                 label={t(label)}
                 detail={detail ? t(detail) : undefined}
                 selected={(noise || noiseDefault) === value}
-                onSelect={() => setNoise(value)}
+                onSelect={() => chooseNoise(value)}
               />
             ))}
           </div>
@@ -1414,7 +1420,7 @@ function App() {
                     {t("codeLabel")} <strong className="code">{code}</strong>
                   </span>
                 )}
-                <button className="textbutton" onClick={() => setSheet("device")} disabled={active}>
+                <button className="textbutton" onClick={() => setSheet("device")} disabled={busy}>
                   <Mic size={14} aria-hidden="true" />
                   {deviceLabel}
                 </button>

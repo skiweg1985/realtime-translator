@@ -17,11 +17,17 @@ class FakeChannel:
         self.publish = publish
         self.noise_reduction = noise_reduction
         self.status = 'live'
+        self.spoke = False
         self.task = None
         self.closed = False
         self.instances.append(self)
     def start(self):
         self.task = asyncio.create_task(asyncio.Event().wait())
+    def feed(self, pcm):
+        self.fed = getattr(self, 'fed', []) + [pcm]
+        if pcm is None:
+            self.task.cancel()
+        return True
     async def close(self):
         self.closed = True
         self.task.cancel()
@@ -100,6 +106,22 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'TRANSLATE_NOISE_REDUCTION', 'near_field'):
             self.assertEqual(main.room_noise_reduction(self.room), 'near_field')
 
+    async def test_setting_change_swaps_channels_without_a_status_for_listeners(self):
+        a = await self.join('en');await self.join('fr')
+        old = dict(self.room.channels)
+        self.room.noise_reduction = 'near_field'
+        await main.swap_channels(self.room)
+        await asyncio.gather(*self.room.retiring, return_exceptions=True)
+        self.assertEqual({l: c.noise_reduction for l, c in self.room.channels.items()}, {'en': 'near_field', 'fr': 'near_field'})
+        self.assertTrue(all(c.fed == [None] and c.closed for c in old.values()))
+        await old['en'].publish({'type': 'status', 'status': 'ended'})
+        await old['en'].publish({'type': 'audio', 'delta': 'tail'})
+        self.assertEqual(a.queue.get_nowait()['delta'], 'tail')
+        self.assertTrue(a.queue.empty())
+        self.assertTrue(main.is_quiet(bytes(4800)))
+        loud = (b'\x10\x27' * 2400)
+        self.assertFalse(main.is_quiet(loud))
+
     async def test_waiting_room_does_not_open_upstreams(self):
         self.room.active = False
         await self.join('fr')
@@ -115,6 +137,10 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         await self.room.channels['en'].publish({'type':'translation_delta','delta':'Hello'})
         await self.room.channels['fr'].publish({'type':'translation_delta','delta':'Bonjour'})
         self.assertEqual(self.room.translations,{'en':'Hello','fr':'Bonjour'})
+        await main.swap_channels(self.room)
+        await asyncio.gather(*self.room.retiring, return_exceptions=True)
+        await self.room.channels['en'].publish({'type':'translation_delta','delta':'again'})
+        self.assertEqual(self.room.translations['en'],'Hello again')
 
 class SessionUpdate(unittest.IsolatedAsyncioTestCase):
     async def open_channel(self, reply, **kwargs):
