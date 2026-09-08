@@ -180,8 +180,25 @@ main {
 .identity {
   padding-top: var(--space-2);
 }
-.is-home .choices {
-  margin-top: auto;
+/* Stimmlinie im Leerraum: wie gedruckt, keine Bewegung im Leerlauf. */
+.voice-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  margin: 0 calc(-1 * var(--space-5));
+}
+.voice {
+  display: block;
+  width: 100%;
+  height: 120px;
+  color: var(--line-strong);
+}
+.voice path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
 }
 .identity-name {
   display: block;

@@ -112,6 +112,41 @@ function reducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+/* Stimmlinie, SONAs Motiv: aus Amplituden (-1 bis 1) eine ruhige Kurve. Im Leerlauf fast nur eine Linie,
+   später mit denselben Pegeldaten wie der Meter live. */
+function voicePath(values: ArrayLike<number>, w: number, h: number) {
+  const n = values.length,
+    mid = h / 2,
+    step = w / (n - 1);
+  const pts: [number, number][] = [];
+  for (let i = 0; i < n; i++) pts.push([i * step, mid - values[i] * (mid - 1)]);
+  const f = (v: number) => v.toFixed(1);
+  let d = "M " + f(pts[0][0]) + " " + f(pts[0][1]);
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)],
+      p1 = pts[i],
+      p2 = pts[i + 1],
+      p3 = pts[Math.min(n - 1, i + 2)];
+    d +=
+      " C " + f(p1[0] + (p2[0] - p0[0]) / 6) + " " + f(p1[1] + (p2[1] - p0[1]) / 6) +
+      " " + f(p2[0] - (p3[0] - p1[0]) / 6) + " " + f(p2[1] - (p3[1] - p1[1]) / 6) +
+      " " + f(p2[0]) + " " + f(p2[1]);
+  }
+  return d;
+}
+const IDLE_VOICE = [
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.01, 0.04, 0.09, 0.14, 0.13, 0.07, 0.02, 0.06, 0.18, 0.34, 0.5,
+  0.55, 0.42, 0.18, -0.12, -0.36, -0.46, -0.38, -0.2, -0.04, 0.08, 0.16, 0.15, 0.08, 0.02, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0,
+];
+function VoiceLine({ values, className = "" }: { values: ArrayLike<number>; className?: string }) {
+  return (
+    <svg className={"voice " + className} viewBox="0 0 400 120" preserveAspectRatio="none" aria-hidden="true">
+      <path d={voicePath(values, 400, 120)} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 /* Pegelanzeige aus echten Audiodaten: die letzten Werte als Balken über einer Grundlinie. */
 function LevelMeter({
   levels,
@@ -1262,6 +1297,9 @@ function App() {
             <div className="identity">
               <span className="identity-name">SONA</span>
               <span className="identity-desc">{t("productDescriptor")}</span>
+            </div>
+            <div className="voice-stage">
+              <VoiceLine values={IDLE_VOICE} />
             </div>
             <div className="choices">
               <button className="choice" onClick={() => setRole("speaker")}>
