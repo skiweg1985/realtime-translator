@@ -29,7 +29,7 @@ Open `http://localhost:5173`. The dev server proxies `/api` and the WebSocket to
 
 ## Trust HTTPS on iPhone
 
-1. Open `http://YOUR_LAN_IP:8080/local-ca.cer` in Safari. This HTTP port serves only the public certificate.
+1. Open `http://YOUR_LAN_IP:8080/local-ca.cer` in Safari. Port 8080 serves the app over plain HTTP as well; the microphone and camera still need the HTTPS port because browsers only grant them in a secure context.
 2. Install the downloaded profile in Settings → General → VPN & Device Management.
 3. Enable full trust for **Translate Local Development CA** in Settings → General → About → Certificate Trust Settings.
 4. Open the HTTPS app and allow microphone access.
