@@ -400,6 +400,14 @@ button.lang:active {
   line-height: 1.5;
   color: var(--ink-2);
 }
+.standby.centered {
+  padding: 0;
+  border: 0;
+  text-align: center;
+}
+.standby.centered span {
+  margin-inline: auto;
+}
 .standby.closed strong {
   font-size: calc(var(--text-lg) * 1.2);
 }
@@ -469,7 +477,12 @@ button.lang:active {
   margin: 0;
   font-size: var(--text-md);
   font-weight: 500;
-  color: var(--ink-2);
+  color: var(--ink);
+}
+.audio-stage .meter.large {
+  margin: 0 calc(-1 * var(--space-5));
+  width: auto;
+  align-self: stretch;
 }
 
 /* Untertitel: aktueller Satz groß, Verlauf darüber ruhiger */
@@ -677,6 +690,10 @@ button.lang:active {
 .btn-icon {
   flex: 0 0 56px;
   padding: 0;
+}
+/* Beenden trägt den längsten Text der Zeile */
+.btn-stop {
+  flex: 1.6;
 }
 /* Drei beschriftete Buttons nebeneinander bleiben auch auf 320 px lesbar */
 .dock-row:has(> :nth-child(3)) .btn {

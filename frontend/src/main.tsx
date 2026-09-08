@@ -182,10 +182,7 @@ function LevelMeter({
       ctx.strokeStyle = color;
       if (!active) {
         ctx.globalAlpha = 0.3;
-        ctx.beginPath();
-        ctx.moveTo(0, Math.round(h / 2) + 0.5);
-        ctx.lineTo(w, Math.round(h / 2) + 0.5);
-        ctx.stroke();
+        ctx.stroke(new Path2D(voicePath(IDLE_VOICE, w, h)));
         return;
       }
       const data = levels.current,
@@ -289,27 +286,20 @@ function Scanner({
 /* Untertitel: Verlauf oben, aktueller Satz groß und unten verankert. */
 function Captions({
   label,
-  lang,
   text,
-  placeholder,
   endRef,
 }: {
   label: string;
-  lang: string;
   text: string;
-  placeholder: string;
   endRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { history, current } = splitCaption(text);
   return (
     <section className="captions" aria-label={label}>
-      <div className="captions-label">
-        {label} <span>· {lang}</span>
-      </div>
       <div className="caption">
         {history && <p className="caption-history">{history}</p>}
         <p className="caption-current" aria-live="polite">
-          {current || <span className="placeholder">{placeholder}</span>}
+          {current}
         </p>
         <div ref={endRef} />
       </div>
@@ -978,25 +968,24 @@ function App() {
   const stateLabel: Record<Status, string> = {
     idle: t("stateIdle"),
     connecting: t("stateConnecting"),
-    live: t("stateLive"),
+    live: !listener && micMuted ? t("stateMuted") : t("stateLive"),
     waiting: t("stateWaiting"),
     ended: t("stateEnded"),
     closed: t("stateClosed"),
     draining: t("stateDraining"),
     error: t("stateError"),
   };
-  /* Deutlicher Zwischenzustand statt nur eines Punkts oben rechts. */
-  const standby: [Key, Key] | null = listener
-    ? status === "waiting"
+  /* Zuhörer: was als Nächstes passiert, als Text statt nur als Punkt oben rechts. */
+  const standby: [Key, Key] | null = !listener
+    ? null
+    : status === "waiting"
       ? ["standbyWaitingTitle", "standbyWaitingText"]
       : status === "ended"
         ? ["standbyPausedTitle", "standbyPausedText"]
         : status === "closed"
           ? ["standbyClosedTitle", "standbyClosedText"]
-          : null
-    : status === "ended" && room
-      ? ["standbySpeakerTitle", "standbySpeakerText"]
-      : null;
+          : null;
+  const transcript = listener ? text : original;
   const deviceLabel =
     devices.find((d) => d.deviceId === device)?.label || t("micDefault");
   const showText = listener ? mode !== "audio" : true;
@@ -1084,6 +1073,7 @@ function App() {
             options={themes.map((th) => ({ key: th.key, label: t(th.label) }))}
             onChange={setTheme}
           />
+          <small>{t("footerPrivacy")}</small>
         </Sheet>
       )}
       {sheet === "join" && (
@@ -1355,7 +1345,7 @@ function App() {
           <>
             {brand}
             <div className="topbar-right">
-              {stateView}
+              {!(listener && mode === "audio") && stateView}
               {settingsButton}
             </div>
           </>
@@ -1382,11 +1372,9 @@ function App() {
               )}
             </div>
           )}
-          {!session && <p className="intro">{listener ? t("introListener") : t("introSpeaker")}</p>}
           {!listener && (
             <>
               <div className="meta">
-                <span>{statusLabel[status]}</span>
                 {room && (
                   <span>
                     <strong>{count}</strong> {count === 1 ? t("listenersOne") : t("listenersMany")}
@@ -1404,62 +1392,55 @@ function App() {
                   </button>
                 )}
               </div>
-              <LevelMeter levels={levels} active={status === "live" && !micMuted} />
+              {/* Ohne Transkript trägt die Stimmlinie den Raum, mit Transkript rückt sie schmal darüber. */}
+              {transcript ? (
+                <LevelMeter levels={levels} active={status === "live" && !micMuted} />
+              ) : (
+                <div className="audio-stage">
+                  <LevelMeter levels={levels} active={status === "live" && !micMuted} className="large" />
+                </div>
+              )}
             </>
           )}
           {showAudio && !focus && (
             mode === "audio" ? (
               <div className="audio-stage">
                 <LevelMeter levels={levels} active={joined} className="large" />
-                <p className="status-line">{statusLabel[status]}</p>
+                {standby ? (
+                  <div className={"standby centered " + status} role="status">
+                    <strong>{t(standby[0])}</strong>
+                    <span>{t(standby[1])}</span>
+                  </div>
+                ) : (
+                  <p className="status-line">{stateLabel[status]}</p>
+                )}
                 <button className="textbutton" onClick={() => setSheet("audio")}>
                   {t("audioCheck")}
                 </button>
               </div>
+            ) : transcript || standby ? (
+              <LevelMeter levels={levels} active={joined} className="small" />
             ) : (
-              <>
-                <div className="meta">
-                  <span>{statusLabel[status]}</span>
-                  <button className="textbutton" onClick={() => setSheet("audio")}>
-                    {t("audioCheck")}
-                  </button>
-                </div>
-                <LevelMeter levels={levels} active={joined} className="small" />
-              </>
+              <div className="audio-stage">
+                <LevelMeter levels={levels} active={joined} className="large" />
+              </div>
             )
           )}
           {!focus && alerts}
-          {standby && (
+          {standby && mode !== "audio" && (
             <div className={"standby " + status} role="status">
               <strong>{t(standby[0])}</strong>
               <span>{t(standby[1])}</span>
             </div>
           )}
-          {showText && (
+          {showText && transcript && (
             <Captions
-              label={listener ? t("captionsTranslation") : t("captionsYourWords")}
-              lang={listener ? languages[language] : languages[source]}
-              text={listener ? text : original}
-              placeholder={
-                listener
-                  ? standby
-                    ? ""
-                    : joined
-                      ? t("placeholderListenerJoined")
-                      : t("placeholderListenerIdle")
-                  : transcription === "configured"
-                    ? t("placeholderSpeaker")
-                    : t("placeholderNoCaptions")
-              }
+              label={listener ? languages[language] : languages[source]}
+              text={transcript}
               endRef={transcriptEnd}
             />
           )}
           {mode === "audio" && listener && !focus && alerts}
-          {!session && (
-            <footer>
-              <span>{t("footerPrivacy")}</span>
-            </footer>
-          )}
         </div>
       </main>
       {focus ? (
@@ -1500,9 +1481,9 @@ function App() {
                       <Maximize2 size={18} />
                       <span>{t("focus")}</span>
                     </button>
-                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                    <button className="btn btn-secondary btn-stop" onClick={stop} disabled={busy}>
                       <LogOut size={18} />
-                      <span>{t("leave")}</span>
+                      <span>{t("leaveShort")}</span>
                     </button>
                   </>
                 ) : (
@@ -1511,7 +1492,7 @@ function App() {
                       {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
                       <span>{muted ? t("soundOn") : t("soundOff")}</span>
                     </button>
-                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                    <button className="btn btn-secondary btn-stop" onClick={stop} disabled={busy}>
                       {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <LogOut size={18} />}
                       <span>{status === "connecting" ? t("statusConnecting") : t("leave")}</span>
                     </button>
@@ -1543,7 +1524,7 @@ function App() {
                       <span>{micMuted ? t("micOn") : t("micOff")}</span>
                     </button>
                   )}
-                  <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                  <button className="btn btn-secondary btn-stop" onClick={stop} disabled={busy}>
                     {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Square size={14} fill="currentColor" />}
                     <span>
                       {status === "connecting"
