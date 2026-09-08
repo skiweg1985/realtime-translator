@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Mic,
-  ArrowUpRight,
   Headphones,
   AudioLines,
   Link,
@@ -12,10 +11,17 @@ import {
   VolumeX,
   X,
   ChevronDown,
+  ChevronRight,
   Radio,
   ArrowRight,
+  Lock,
+  Loader2,
+  AlertCircle,
+  Info,
+  Share,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import "@fontsource-variable/inter/opsz.css";
 import "./style.css";
 
 const languages: Record<string, string> = {
@@ -33,7 +39,63 @@ const languages: Record<string, string> = {
   ja: "日本語",
   zh: "中文",
 };
+const languageOptions = Object.entries(languages) as [string, string][];
 type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining";
+
+/* Gestylter Chip mit unsichtbarem nativem select darüber: iOS zeigt seinen Picker. */
+function ChipSelect({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+  className = "",
+}: {
+  label: string;
+  value: string;
+  options: [string, string][];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  const current = options.find(([k]) => k === value)?.[1] ?? value;
+  return (
+    <label className={"chip " + (disabled ? "is-locked " : "") + className}>
+      <span className="chip-label">{label}</span>
+      <span className="chip-value">{current}</span>
+      <span className="chip-icon" aria-hidden="true">
+        {disabled ? <Lock size={13} /> : <ChevronDown size={16} />}
+      </span>
+      <select
+        aria-label={label}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {options.map(([k, v]) => (
+          <option key={k} value={k}>
+            {v}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* Browser-Fehler beim Mikrofonzugriff in verständliche Hinweise übersetzen. */
+function describeError(e: unknown) {
+  const name = e instanceof DOMException ? e.name : "";
+  if (name === "NotAllowedError" || name === "PermissionDeniedError")
+    return "Mikrofonzugriff wurde abgelehnt. Bitte in den Browser-Einstellungen erlauben.";
+  if (name === "NotFoundError" || name === "OverconstrainedError")
+    return "Kein passendes Mikrofon gefunden. Bitte ein anderes Gerät wählen.";
+  if (name === "NotReadableError")
+    return "Das Mikrofon wird gerade von einer anderen App verwendet.";
+  return e instanceof Error && e.message
+    ? e.message
+    : "Mikrofon konnte nicht gestartet werden.";
+}
+
 function App() {
   const params = new URLSearchParams(location.hash.slice(1));
   const [room, setRoom] = useState(params.get("room") || "");
@@ -58,6 +120,7 @@ function App() {
   const [transcription, setTranscription] = useState("loading");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [device, setDevice] = useState("");
+  const [drag, setDrag] = useState(0);
   const socket = useRef<WebSocket | null>(null),
     context = useRef<AudioContext | null>(null),
     stream = useRef<MediaStream | null>(null);
@@ -68,6 +131,9 @@ function App() {
     running = useRef(false),
     wake = useRef<any>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
+  const sheet = useRef<HTMLElement>(null),
+    dragStart = useRef<number | null>(null),
+    dragNow = useRef(0);
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
@@ -102,6 +168,19 @@ function App() {
     const box = transcriptEnd.current?.parentElement;
     if (box && text) box.scrollTop = box.scrollHeight;
   }, [text, original]);
+  useEffect(() => {
+    if (!share) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeShare();
+    };
+    document.addEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [share]);
   useEffect(
     () => () => {
       socket.current?.close();
@@ -111,7 +190,12 @@ function App() {
     [],
   );
   const active = ["connecting", "live", "draining"].includes(status);
+  const busy = status === "connecting" || status === "draining";
   const link = location.origin + "/#room=" + room;
+  const canShare =
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
+  const clock =
+    Math.floor(elapsed / 60) + ":" + String(elapsed % 60).padStart(2, "0");
   function stopMic() {
     running.current = false;
     capture.current?.disconnect();
@@ -214,7 +298,11 @@ function App() {
           wake.current = await (navigator as any).wakeLock.request("screen");
         } catch {}
       const ws = new WebSocket(
-        "wss://" + location.host + "/api/rooms/" + id + "/ws",
+        (location.protocol === "https:" ? "wss://" : "ws://") +
+          location.host +
+          "/api/rooms/" +
+          id +
+          "/ws",
       );
       socket.current = ws;
       ws.onopen = () =>
@@ -285,11 +373,7 @@ function App() {
     } catch (e) {
       stopMic();
       setStatus("idle");
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Mikrofon konnte nicht gestartet werden.",
-      );
+      setError(describeError(e));
     }
   }
   function stop() {
@@ -312,6 +396,36 @@ function App() {
       setNotice("Bitte den Link im Teilen-Fenster kopieren.");
     }
   }
+  async function shareLink() {
+    try {
+      await navigator.share({ title: "translate live", url: link });
+    } catch {
+      /* Abgebrochen oder nicht erlaubt: kein Fehler für den Nutzer. */
+    }
+  }
+  function closeShare() {
+    setShare(false);
+    setDrag(0);
+    dragStart.current = null;
+    dragNow.current = 0;
+  }
+  function onTouchStart(e: React.TouchEvent<HTMLElement>) {
+    if (sheet.current && sheet.current.scrollTop > 0) return;
+    dragStart.current = e.touches[0].clientY;
+    dragNow.current = 0;
+  }
+  function onTouchMove(e: React.TouchEvent<HTMLElement>) {
+    if (dragStart.current === null) return;
+    const dy = Math.max(0, e.touches[0].clientY - dragStart.current);
+    dragNow.current = dy;
+    setDrag(dy);
+  }
+  function onTouchEnd() {
+    if (dragStart.current === null) return;
+    dragStart.current = null;
+    if (dragNow.current > 80) closeShare();
+    else setDrag(0);
+  }
   async function testTone() {
     try {
       await setupAudio();
@@ -331,94 +445,79 @@ function App() {
     if (audioGain.current) audioGain.current.gain.value = muted ? 1 : 0;
   }
   const statusLabel: Record<Status, string> = {
-    idle: "Bereit, wenn du es bist",
+    idle: listener ? "Bereit zum Zuhören" : "Bereit, wenn du es bist",
     connecting: "Verbindung wird aufgebaut",
     live: listener ? "Du bist live dabei" : "Deine Stimme verbindet",
     waiting: "Warte auf den Sprecher",
     ended: "Sitzung pausiert",
     draining: "Letzte Worte werden übersetzt",
   };
+  const pillLabel: Record<Status, string> = {
+    idle: "Bereit",
+    connecting: "Verbindet",
+    live: "Live",
+    waiting: "Wartet",
+    ended: "Pausiert",
+    draining: "Beendet",
+  };
   return (
     <div className="app">
-      <header>
-        <a className="brand" href="/">
-          <span className="brand-icon">
-            <AudioLines size={21} />
-          </span>
-          translate<span className="brand-dot">live</span>
-        </a>
-        <span className="endpoint">
-          <span /> LiteLLM Translate
-        </span>
+      <header className="topbar glass">
+        <div className="topbar-inner">
+          <a className="brand" href="/" aria-label="translate live, Startseite">
+            <span className="brand-icon">
+              <AudioLines size={18} />
+            </span>
+            <span className="brand-name">
+              translate<span>live</span>
+            </span>
+          </a>
+          <div className={"status-pill " + status} role="status">
+            <span className="status-dot" aria-hidden="true" />
+            <span>{pillLabel[status]}</span>
+            {status === "live" && <span className="timer">{clock}</span>}
+          </div>
+        </div>
       </header>
       <main>
-        <div className="eyebrow">
-          <span className={status === "live" ? "live-dot" : "small-dot"} />
-          {listener ? "ZUHÖREN" : "SPRECHEN & VERBINDEN"}
-          {status === "live" && (
-            <span className="timer">
-              {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
-            </span>
-          )}
-        </div>
-        <h1>
-          {listener ? (
-            <>
-              Eine Sprache.
-              <br />
-              <span>Alle verbunden.</span>
-            </>
-          ) : (
-            <>
-              Deine Worte.
-              <br />
-              <span>Ohne Sprachgrenzen.</span>
-            </>
-          )}
-        </h1>
-        <p className="intro">
-          {listener
-            ? "Hör die Übersetzung live. Oder lies einfach mit."
-            : "Sprich ganz natürlich. Andere hören und lesen live mit."}
-        </p>
-        <div className="language-row">
-          <label>
-            <span>Gesprochen</span>
-            <div>
-              <select
-                aria-label="Gesprochene Sprache"
-                value={source}
-                disabled={!!room}
-                onChange={(e) => setSource(e.target.value)}
-              >
-                {Object.entries(languages).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={14} />
-            </div>
-          </label>
-          <ArrowRight size={18} className="language-arrow" />
-          <label>
-            <span>Übersetzt</span>
-            <div>
-              <select
-                aria-label="Zielsprache"
-                value={language}
-                disabled={!!room}
-                onChange={(e) => setLanguage(e.target.value)}
-              >
-                {Object.entries(languages).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={14} />
-            </div>
-          </label>
+        <section className="hero">
+          <h1>
+            {listener ? (
+              <>
+                Eine Sprache.
+                <br />
+                <span>Alle verbunden.</span>
+              </>
+            ) : (
+              <>
+                Deine Worte.
+                <br />
+                <span>Ohne Sprachgrenzen.</span>
+              </>
+            )}
+          </h1>
+          <p className="intro">
+            {listener
+              ? "Hör die Übersetzung live. Oder lies einfach mit."
+              : "Sprich ganz natürlich. Andere hören und lesen live mit."}
+          </p>
+        </section>
+        <div className="language-row glass">
+          <ChipSelect
+            label="Gesprochen"
+            value={source}
+            options={languageOptions}
+            disabled={!!room}
+            onChange={setSource}
+          />
+          <ArrowRight size={16} className="language-arrow" aria-hidden="true" />
+          <ChipSelect
+            label="Übersetzt"
+            value={language}
+            options={languageOptions}
+            disabled={!!room}
+            onChange={setLanguage}
+          />
         </div>
         <section className="stage" aria-label="Live-Audio">
           <div
@@ -435,35 +534,37 @@ function App() {
           <p className="status" role="status">
             {statusLabel[status]}
           </p>
-          <div className="controls">
+          <div className="controls glass">
             {!active && status !== "waiting" ? (
               <button className="primary" onClick={start}>
-                {listener ? <Headphones size={19} /> : <Mic size={19} />}{" "}
+                {listener ? <Headphones size={18} /> : <Mic size={18} />}
                 {listener
                   ? "Live zuhören"
                   : status === "ended"
                     ? "Weiter sprechen"
-                    : "Sprechen starten"}{" "}
-                <ArrowUpRight size={18} />
+                    : "Sprechen starten"}
               </button>
             ) : (
-              <button
-                className="primary stop"
-                disabled={status === "draining" || status === "connecting"}
-                onClick={stop}
-              >
-                <Square size={15} fill="currentColor" />
-                {status === "draining"
-                  ? "Wird abgeschlossen …"
-                  : listener
-                    ? "Verlassen"
-                    : "Sprechen beenden"}
+              <button className="primary stop" disabled={busy} onClick={stop}>
+                {busy ? (
+                  <Loader2 size={18} className="spin" aria-hidden="true" />
+                ) : (
+                  <Square size={14} fill="currentColor" />
+                )}
+                {status === "connecting"
+                  ? "Verbinden …"
+                  : status === "draining"
+                    ? "Wird abgeschlossen …"
+                    : listener
+                      ? "Verlassen"
+                      : "Sprechen beenden"}
               </button>
             )}
             {listener && (
               <button
-                className="icon-button"
+                className="icon-button glass"
                 onClick={toggleMute}
+                aria-pressed={muted}
                 aria-label={muted ? "Ton einschalten" : "Ton stummschalten"}
               >
                 {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
@@ -471,7 +572,7 @@ function App() {
             )}
             {!listener && room && (
               <button
-                className="icon-button"
+                className="icon-button glass"
                 onClick={() => setShare(true)}
                 aria-label="Zuhörer einladen"
               >
@@ -486,35 +587,82 @@ function App() {
                 ? `${count} ${count === 1 ? "Person hört" : "Personen hören"} zu · Link teilen und gemeinsam starten`
                 : "Handy, Mikrofon oder AirPods. Ein Fingertipp genügt."}
           </p>
-          {listener && <details className="audio-check"><summary>Audio prüfen</summary><p>Audio-Pakete: {audioInfo.chunks} · Pegel: {audioInfo.peak}%<br/>Wiedergabe: {audioInfo.state} · {muted ? "stumm" : "Ton an"}</p><button className="icon-button" aria-label="Testton abspielen" onClick={testTone}><Volume2 size={18}/></button><p>{toneResult || "Testton abspielen"}</p></details>}
           {!listener && devices.length > 1 && (
-            <select
-              className="device"
-              aria-label="Mikrofon"
+            <ChipSelect
+              className="standalone glass"
+              label="Mikrofon"
               value={device}
               disabled={active}
-              onChange={(e) => setDevice(e.target.value)}
-            >
-              <option value="">Standardmikrofon</option>
-              {devices.map((d) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label || "Mikrofon"}
-                </option>
-              ))}
-            </select>
+              options={[
+                ["", "Standardmikrofon"],
+                ...devices.map(
+                  (d) => [d.deviceId, d.label || "Mikrofon"] as [string, string],
+                ),
+              ]}
+              onChange={setDevice}
+            />
+          )}
+          {listener && (
+            <details className="audio-check glass">
+              <summary>
+                Audio prüfen
+                <ChevronDown size={16} aria-hidden="true" />
+              </summary>
+              <div className="audio-body">
+                <dl>
+                  <dt>Audio-Pakete</dt>
+                  <dd>{audioInfo.chunks}</dd>
+                  <dt>Pegel</dt>
+                  <dd>{audioInfo.peak} %</dd>
+                  <dt>Wiedergabe</dt>
+                  <dd>{audioInfo.state}</dd>
+                  <dt>Ton</dt>
+                  <dd>{muted ? "stumm" : "an"}</dd>
+                </dl>
+                <div className="tone">
+                  <button className="secondary glass" onClick={testTone}>
+                    <Volume2 size={16} />
+                    Testton
+                  </button>
+                  <span>{toneResult}</span>
+                </div>
+              </div>
+            </details>
           )}
         </section>
         {error && (
           <div className="alert" role="alert">
-            {error}
+            <AlertCircle size={18} aria-hidden="true" />
+            <span>{error}</span>
+            <button
+              className="dismiss"
+              onClick={() => setError("")}
+              aria-label="Meldung schließen"
+            >
+              <X size={18} />
+            </button>
           </div>
         )}
-        {notice && <div className="notice">{notice}</div>}
+        {notice && (
+          <div className="notice">
+            <Info size={18} aria-hidden="true" />
+            <span>{notice}</span>
+            <button
+              className="dismiss"
+              onClick={() => setNotice("")}
+              aria-label="Hinweis schließen"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        )}
         <section className={"transcripts " + (listener ? "single" : "")}>
           {!listener && (
-            <article>
+            <article className="card glass">
               <div className="card-label">
-                <Mic size={15} /> DEINE WORTE <span>{languages[source]}</span>
+                <Mic size={15} />
+                Deine Worte
+                <span className="tag">{languages[source]}</span>
               </div>
               <div className="transcript" aria-live="polite">
                 {original || (
@@ -527,10 +675,11 @@ function App() {
               </div>
             </article>
           )}
-          <article>
+          <article className="card glass translation">
             <div className="card-label">
-              <AudioLines size={15} /> LIVE-ÜBERSETZUNG{" "}
-              <span>{languages[language]}</span>
+              <AudioLines size={15} />
+              Live-Übersetzung
+              <span className="tag">{languages[language]}</span>
             </div>
             <div className="transcript" aria-live="polite">
               {text || (
@@ -545,35 +694,44 @@ function App() {
           </article>
         </section>
         {room && !listener && (
-          <button className="invite" onClick={() => setShare(true)}>
-            <span>
-              <Radio size={19} />
-              <span>
-                Zuhörer einladen
-                <small>Ein Link. Beliebige Geräte. Gemeinsam zuhören.</small>
-              </span>
+          <button className="invite glass" onClick={() => setShare(true)}>
+            <span className="tile">
+              <Radio size={20} />
             </span>
-            <ArrowUpRight size={19} />
+            <span className="text">
+              <strong>Zuhörer einladen</strong>
+              <small>Ein Link. Beliebige Geräte. Gemeinsam zuhören.</small>
+            </span>
+            <ChevronRight size={20} aria-hidden="true" />
           </button>
         )}
       </main>
       <footer>
-        <span>Eine Stimme. Mehr Verständnis.</span>
         <span>Keine Anmeldung · Keine dauerhafte Aufzeichnung</span>
-        <a href="/local-ca.cer">iPhone-Zertifikat</a>
+        <span>
+          <span>LiteLLM Translate</span>
+          <a href="/local-ca.cer">iPhone-Zertifikat</a>
+        </span>
       </footer>
       {share && (
-        <div className="modal-backdrop" onClick={() => setShare(false)}>
+        <div className="sheet-backdrop" onClick={closeShare}>
           <section
-            className="modal"
+            ref={sheet}
+            className={"sheet glass " + (drag > 0 ? "is-dragging" : "")}
             role="dialog"
             aria-modal="true"
             aria-label="Sitzung teilen"
+            style={drag > 0 ? { transform: `translateY(${drag}px)` } : undefined}
             onClick={(e) => e.stopPropagation()}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+            onTouchCancel={onTouchEnd}
           >
+            <div className="grabber" aria-hidden="true" />
             <button
               className="close icon-button"
-              onClick={() => setShare(false)}
+              onClick={closeShare}
               aria-label="Schließen"
             >
               <X size={20} />
@@ -585,17 +743,33 @@ function App() {
               Dann auf „Live zuhören“ tippen.
             </p>
             <div className="qr">
-              <QRCodeSVG value={link} size={184} level="M" />
+              {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
+              <QRCodeSVG value={link} size={168} level="M" bgColor="#ffffff" fgColor="#111111" />
             </div>
-            <input
-              readOnly
-              aria-label="Zuhörerlink"
-              value={link}
-              onFocus={(e) => e.target.select()}
-            />
-            <button className="primary" onClick={copy}>
-              {copied ? <Check size={18} /> : <Link size={18} />}{" "}
-              {copied ? "Link kopiert" : "Link kopieren"}
+            <div className="link-row">
+              <input
+                readOnly
+                aria-label="Zuhörerlink"
+                value={link}
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                className="icon-button glass"
+                onClick={copy}
+                aria-label={copied ? "Link kopiert" : "Link kopieren"}
+              >
+                {copied ? <Check size={18} /> : <Link size={18} />}
+              </button>
+            </div>
+            <button className="primary" onClick={canShare ? shareLink : copy}>
+              {canShare ? (
+                <Share size={18} />
+              ) : copied ? (
+                <Check size={18} />
+              ) : (
+                <Link size={18} />
+              )}
+              {canShare ? "Link teilen" : copied ? "Link kopiert" : "Link kopieren"}
             </button>
             <small>
               Im selben Netzwerk. Auf dem iPhone zuerst das lokale Zertifikat
