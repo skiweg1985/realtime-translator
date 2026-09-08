@@ -25,6 +25,7 @@ class TranslationChannel:
         self.noise_reduction = noise_reduction
         self.queue = asyncio.Queue(maxsize=100)
         self.status = 'connecting'
+        self.spoke = False
         self.task = None
 
     def start(self):

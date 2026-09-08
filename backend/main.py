@@ -1,4 +1,5 @@
 """Single-worker, ephemeral rooms bridging browsers to LiteLLM Translate."""
+import array
 import asyncio
 import contextlib
 import json
@@ -41,6 +42,14 @@ def noise_reduction_setting(name, default):
 TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'off')
 TRANSCRIBE_NOISE_REDUCTION = noise_reduction_setting('TRANSCRIBE_NOISE_REDUCTION', 'near_field')
 
+def chosen_noise_reduction(value):
+    """The speaker's per-session choice; anything unknown means the configured default."""
+    return value if value in NOISE_REDUCTION_MODES else None
+
+def room_noise_reduction(room):
+    mode = room.noise_reduction or TRANSLATE_NOISE_REDUCTION or 'off'
+    return None if mode == 'off' else mode
+
 @dataclass(eq=False)
 class Peer:
     ws: WebSocket
@@ -62,6 +71,8 @@ class Room:
     draining: bool = False
     original: str = ''
     code: str = ''
+    noise_reduction: str | None = None
+    retiring: list = field(default_factory=list)
 
 rooms: dict[str, Room] = {}
 
@@ -183,12 +194,48 @@ def ensure_channel(room, language):
         return
     async def publish(event):
         if event['type'] == 'translation_delta':
-            room.translations[language] = (room.translations.get(language, '') + event['delta'])[-20000:]
+            text = room.translations.get(language, '')
+            if not channel.spoke and text and not text[-1].isspace() and not event['delta'][:1].isspace():
+                text += ' '  # a channel opened mid-session continues after the previous channel's text
+            channel.spoke = True
+            room.translations[language] = (text + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
-    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=TRANSLATE_NOISE_REDUCTION)
+    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=room_noise_reduction(room))
     room.channels[language] = channel
     channel.start()
+
+
+def is_quiet(pcm):
+    """Below normal speech level; the frontend maps an RMS of 5000 to full scale."""
+    samples = array.array('h', pcm)
+    return sum(s * s for s in samples) / len(samples) < 400 * 400
+
+
+async def swap_channels(room):
+    """Reopen every translation channel with the room's current noise setting.
+
+    Listeners keep their connection: the new channel takes the microphone from now on, the
+    old one drains its last sentence and may only pass audio and text, never a status."""
+    async with room.lock:
+        for language, old in list(room.channels.items()):
+            del room.channels[language]
+            ensure_channel(room, language)
+            forward = old.publish
+            async def tail(event, forward=forward):
+                if event['type'] in ('audio', 'translation_delta'):
+                    await forward(event)
+            old.publish = tail
+            old.feed(None)
+            room.retiring.append(asyncio.create_task(retire(old)))
+
+
+async def retire(channel):
+    try:
+        async with asyncio.timeout(12):
+            await asyncio.gather(channel.task, return_exceptions=True)
+    finally:
+        await channel.close()
 
 
 async def prune_channels(room):
@@ -233,6 +280,8 @@ async def translation(room, ws, speaker):
         for language in {p.language for p in room.peers if p.language}:
             ensure_channel(room, language)
     await speaker.queue.put({'type': 'status', 'status': 'live'})
+    swap = None  # frames waited for a pause since the speaker changed a setting
+    quiet = 0
     try:
         async with asyncio.timeout(600):
             while True:
@@ -243,6 +292,13 @@ async def translation(room, ws, speaker):
                 if pcm is not None:
                     if len(pcm) != 4800:
                         raise ValueError('Invalid audio frame')
+                    if swap is not None:
+                        # Swap in a pause of half a second, or after three seconds at the latest.
+                        swap += 1
+                        quiet = quiet + 1 if is_quiet(pcm) else 0
+                        if quiet >= 5 or swap >= 30:
+                            swap = None
+                            await swap_channels(room)
                     if not transcriber.done():
                         try:
                             audio_queue.put_nowait(pcm)
@@ -255,6 +311,12 @@ async def translation(room, ws, speaker):
                             await broadcast(room, {'type': 'error', 'message': 'Diese Übersetzung kommt nicht nach. Bitte erneut verbinden.'}, language)
                 elif message.get('text') == 'stop':
                     break
+                elif message.get('text'):
+                    update = json.loads(message['text'])
+                    if update.get('type') != 'settings':
+                        raise ValueError('Invalid message')
+                    room.noise_reduction = chosen_noise_reduction(update.get('noise_reduction'))
+                    swap, quiet = 0, 0
                 else:
                     raise ValueError('Invalid message')
     except TimeoutError:
@@ -283,6 +345,10 @@ async def translation(room, ws, speaker):
                 for channel in room.channels.values():
                     await channel.close()
                 room.channels.clear()
+            for task in room.retiring:
+                task.cancel()
+            await asyncio.gather(*room.retiring, return_exceptions=True)
+            room.retiring.clear()
 
 @app.websocket('/api/rooms/{room_id}/ws')
 async def room_socket(ws: WebSocket, room_id: str):
@@ -307,6 +373,7 @@ async def room_socket(ws: WebSocket, room_id: str):
             return
         if owner:
             room.active = True
+            room.noise_reduction = chosen_noise_reduction(auth.get('noise_reduction'))
         room.peers.add(peer)
         sending = asyncio.create_task(send_peer(peer))
         if owner:
