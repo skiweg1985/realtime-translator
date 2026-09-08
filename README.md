@@ -8,12 +8,12 @@ A small mobile and desktop web app for the LiteLLM Translate endpoint. One speak
 git clone git@github.com:skiweg1985/realtime-translator.git
 cd realtime-translator
 cp .env.example .env
-# Set TRANSLATE_KEY to a dedicated Translate-only Virtual Key.
+# Set TRANSLATE_KEY to the restricted Translate key and TRANSCRIBE_KEY to the transcription key.
 ./setup-certs.sh YOUR_LAN_IP YOUR_MAC_HOSTNAME.local
 docker compose up -d --build
 ```
 
-Open `https://YOUR_LAN_IP:8443` on devices on the same network. Allow microphone access, choose the source/target languages and tap **Sprechen starten**. Share the listener link using the link button. Listeners tap **Live zuhören** to enable audio playback. Headphones and AirPods use the device's selected audio route; available microphone choices appear after microphone permission. Keep Safari open and the phone unlocked; background audio capture is not guaranteed.
+Open `https://YOUR_LAN_IP:8443` on devices on the same network. Allow microphone access, choose the spoken language and the default listener language and tap **Sprechen starten**. Share the listener link using the link button. Listeners choose **Ich höre** and tap **Live zuhören** to enable audio playback. They can change their language while listening; queued audio is stopped and the selected language's text replaces the previous transcript. Headphones and AirPods use the device's selected audio route; available microphone choices appear after microphone permission. Keep Safari open and the phone unlocked; background audio capture is not guaranteed.
 
 ## Develop the frontend
 
@@ -38,13 +38,15 @@ On desktop, import `certs/ca.crt` into your trusted certificate store. The setup
 
 ## Audio path and limits
 
-Browser microphone → AudioWorklet (24 kHz mono PCM16) → app WebSocket → existing LiteLLM test Translate WebSocket. The app sends the dedicated key in the upstream Authorization header. Translated audio and text are broadcast to listeners. Browsers never receive the key.
+Browser microphone → AudioWorklet (24 kHz mono PCM16) → app WebSocket → existing LiteLLM test Translate WebSocket. The app sends the dedicated key in the upstream Authorization header. The backend opens one translation connection per language currently requested by listeners and sends its audio/text only to those listeners. Listeners choosing the same language share one connection. The last listener leaving a language closes its connection. Browsers never receive the key.
 
-Original-language captions use local faster-whisper `tiny` on the Docker CPU, with several seconds of delay. Its model downloads once into the `models` volume. This is separate from translation: all translated audio/text comes from LiteLLM/Azure. Tiny-model original captions may contain errors. Language is fixed for each room; return to the home page to choose another language.
+Original-language captions use the Azure `gpt-live-transcribe` deployment through LiteLLM (`azure-live-transcribe`). The microphone stream is sent to a separate cloud transcription connection at 24 kHz; partial captions appear live and final text replaces partial text. The speaker sees only original-language captions; listeners see translated text and hear translated audio. No local speech model is downloaded. If cloud transcription fails or falls behind, a notice is shown and translation continues; restart the session to retry captions. The spoken language is fixed for each room. Listener languages can change at any time; new language channels start at the current audio position and do not replay earlier speech.
 
-The MVP supports one active speaker globally (matching the shared Virtual Key limit), up to 31 listeners while speaking, and ten-minute upstream sessions. After stopping, allow the final audio to drain before restarting. Slow listeners are disconnected instead of accumulating unbounded audio. Rooms and recent text live in memory only and disappear on container restart; inactive rooms expire after two hours when new rooms are created. Links grant access to a room, so share them only with intended listeners. The speaker capability is kept in the creating browser's session storage. No database, login or persistent recording is used. This unauthenticated stack is for a trusted local network, not public Internet exposure.
+`TRANSCRIBE_URL` and `TRANSCRIBE_MODEL` default to the LiteLLM test endpoint and `azure-live-transcribe` alias shown in `.env.example`. `TRANSCRIBE_KEY` is a separate Virtual Key allowed to call `azure-live-transcribe`. The test gateway requires `TRANSLATE_KEY` to have exactly `models: [azure-live-translate]` and `allowed_routes: [/v1/realtime/translations]`; it rejects broader keys on that route. Keep these keys separate. The translation key and the test adapter setting `LITELLM_TRANSLATE_MAX_PARALLEL` must both permit four parallel translation connections. Recreate the test gateway container after changing its environment. The transcription key needs one additional independent connection. Health reports whether credentials are configured, not upstream reachability.
 
-The locally provisioned key expires after seven days. Replace `TRANSLATE_KEY` in `.env` and recreate the app when it expires. LiteLLM Translate accounting remains unknown; the upstream service incurs usage charges.
+The MVP supports one active speaker globally, up to 31 listeners while speaking, at most four selected target languages, and ten-minute speaker sessions. A fifth distinct language is rejected without changing an existing listener's selection; another listener can still join any of the four languages. Channel failures are reported only to that language's listeners. Reconnect or select the language again to retry. After stopping, allow the final audio to drain before restarting. Slow listeners are disconnected instead of accumulating unbounded audio. Rooms and recent text live in memory only and disappear on container restart; inactive rooms expire after two hours when new rooms are created. Links grant access to a room, so share them only with intended listeners. The speaker capability is kept in the creating browser's session storage. No database, login or persistent recording is used. This unauthenticated stack is for a trusted local network, not public Internet exposure.
+
+Replace expired or rotated keys in `.env` (`TRANSLATE_KEY` or `TRANSCRIBE_KEY`) and recreate the app to load them. Key expiry follows the configured LiteLLM policy. LiteLLM Translate accounting remains unknown; the upstream service incurs usage charges.
 
 ## Operate
 
@@ -53,14 +55,18 @@ docker compose ps
 docker compose logs --tail=30 app
 # Apply configuration changes:
 docker compose up -d --force-recreate app
-# Stop without deleting the downloaded model:
+# Stop the stack:
 docker compose down
 ```
 
-`GET /api/health` reports endpoint configuration and local caption-model readiness. There is deliberately one Uvicorn worker: rooms and fan-out are in memory. Production LiteLLM and its database are not modified by this stack.
+`GET /api/health` reports endpoint configuration and cloud caption configuration. There is deliberately one Uvicorn worker: rooms and fan-out are in memory. Production LiteLLM and its database are not modified by this stack.
 
 ## Validation
 
-The initial local rollout passed a live synthetic German-to-English test through the real LiteLLM test endpoint: two listeners each received 66 audio chunks and identical translated text; local original-language captions were also returned. Desktop (1440 px) and mobile (390 px) layouts were visually inspected. The browser AudioWorklet was exercised with synthetic microphone input. The user confirmed speaking on an iPhone and listening on an iPad. Safari audio recovered after restarting the browser; the listener view includes an audio diagnostic and test tone.
+The initial local rollout passed a live synthetic German-to-English test through the real LiteLLM test endpoint: two listeners each received 66 audio chunks and identical translated text; local original-language captions were also returned in that initial rollout. Desktop (1440 px) and mobile (390 px) layouts were visually inspected. The browser AudioWorklet was exercised with synthetic microphone input. The user confirmed speaking on an iPhone and listening on an iPad. Safari audio recovered after restarting the browser; the listener view includes an audio diagnostic and test tone.
 
 `tests/test_rooms.py` covers room capability exposure, foreign-origin rejection, language validation and missing-key handling. `tests/live_acceptance.py` runs a bounded provider test with a synthetic PCM16 mono 24 kHz WAV and the local CA; it incurs translation usage and needs the shared speaker slot to be free.
+
+The cloud-caption and multilingual updates build on PR #1. Fifteen regression checks cover room policy, caption ordering/final correction, stream drain, Azure-compatible configuration, failure isolation, channel sharing, language switching, stale-message filtering, and the four-language cap. The frontend build and a mobile speaker-view inspection passed. A live synthetic German test delivered audio/text in English, French, Spanish and Italian to five listeners (77 audio chunks each), while the speaker received only original-language captions. The test also verified rejection of a fifth target language and an English-to-French switch without stale messages. These checks verify transport and delivery, not transcription accuracy; test with your own microphone and vocabulary. The two keys must retain the route/model scopes described above.
+
+`python tests/live_multilingual.py http://localhost:8000 /path/to/test.wav` exercises four simultaneous target languages with five listeners, rejects a fifth language and switches one listener from English to French. It incurs model usage and requires the speaker slot to be free. Use a PCM16 mono 24 kHz WAV.

@@ -40,7 +40,7 @@ const languages: Record<string, string> = {
   zh: "中文",
 };
 const languageOptions = Object.entries(languages) as [string, string][];
-type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining";
+type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining" | "error";
 
 /* Gestylter Chip mit unsichtbarem nativem select darüber: iOS zeigt seinen Picker. */
 function ChipSelect({
@@ -105,6 +105,8 @@ function App() {
   const listener = !!room && !owner;
   const [source, setSource] = useState("de"),
     [language, setLanguage] = useState("en");
+  const selectedLanguage = useRef("en"), subscription = useRef(0);
+  const audioNodes = useRef(new Set<AudioBufferSourceNode>());
   const [status, setStatus] = useState<Status>("idle");
   const [original, setOriginal] = useState(""),
     [text, setText] = useState("");
@@ -143,7 +145,10 @@ function App() {
         .then(async (r) => {
           const x = await r.json();
           if (!r.ok) throw Error(x.detail);
-          setLanguage(x.language);
+          if (subscription.current === 0) {
+            setLanguage(x.language);
+            selectedLanguage.current = x.language;
+          }
           setSource(x.source);
         })
         .catch((e) => setError(e.message));
@@ -166,7 +171,7 @@ function App() {
   }, [status]);
   useEffect(() => {
     const box = transcriptEnd.current?.parentElement;
-    if (box && text) box.scrollTop = box.scrollHeight;
+    if (box && (text || original)) box.scrollTop = box.scrollHeight;
   }, [text, original]);
   useEffect(() => {
     if (!share) return;
@@ -233,6 +238,8 @@ function App() {
     const node = ctx.createBufferSource();
     node.buffer = buffer;
     node.connect(audioGain.current);
+    audioNodes.current.add(node);
+    node.onended = () => { audioNodes.current.delete(node); node.disconnect(); };
     nextAudio.current = Math.max(ctx.currentTime + 0.04, nextAudio.current);
     if (nextAudio.current - ctx.currentTime > 3) {
       setNotice("Die Audioausgabe hängt zurück. Bitte erneut beitreten.");
@@ -247,11 +254,41 @@ function App() {
         String(0.25 + Math.random() * 0.5),
       );
   }
+  function clearPlayback() {
+    for (const node of audioNodes.current) {
+      try { node.stop(); } catch {}
+      node.disconnect();
+    }
+    audioNodes.current.clear();
+    nextAudio.current = 0;
+    setAudioInfo(info => ({...info, chunks: 0, peak: 0}));
+  }
+  function chooseLanguage(value: string) {
+    selectedLanguage.current = value;
+    setLanguage(value);
+    setText("");
+    setError("");
+    setNotice("");
+    clearPlayback();
+    subscription.current += 1;
+    if (listener && socket.current?.readyState === WebSocket.OPEN) {
+      setStatus("connecting");
+      socket.current.send(JSON.stringify({type: "subscribe", language: value, subscription: subscription.current}));
+    }
+  }
   async function start() {
     setError("");
     setNotice("");
     setElapsed(0);
     setStatus("connecting");
+    if (listener) {
+      const old = socket.current;
+      socket.current = null;
+      old?.close();
+      clearPlayback();
+      subscription.current += 1;
+      selectedLanguage.current = language;
+    }
     try {
       await setupAudio(); // Must start inside the user's gesture on iOS.
       let id = room,
@@ -309,12 +346,24 @@ function App() {
         ws.send(
           JSON.stringify(
             listener
-              ? { role: "listener" }
+              ? { role: "listener", language: selectedLanguage.current, subscription: subscription.current }
               : { role: "speaker", owner: secret },
           ),
         );
       ws.onmessage = (message) => {
+        if (socket.current !== ws) return;
         const event = JSON.parse(message.data);
+        if (event.type === "subscription_rejected") {
+          if (event.subscription !== subscription.current) return;
+          subscription.current = event.active_subscription;
+          selectedLanguage.current = event.language || language;
+          setLanguage(selectedLanguage.current);
+          setText(event.text || "");
+          setStatus(event.status || "waiting");
+          setError(event.message);
+          return;
+        }
+        if (listener && event.language && (event.language !== selectedLanguage.current || event.subscription !== subscription.current)) return;
         if (event.type === "snapshot") {
           setText(event.text);
           setOriginal(event.original);
@@ -362,11 +411,14 @@ function App() {
         if (event.type === "error") setError(event.message);
         if (event.type === "notice") setNotice(event.message);
       };
-      ws.onerror = () =>
+      ws.onerror = () => {
+        if (socket.current !== ws) return;
         setError(
           "Verbindung fehlgeschlagen. Bitte Netzwerk und Zertifikat prüfen.",
         );
+      };
       ws.onclose = () => {
+        if (socket.current !== ws) return;
         stopMic();
         setStatus((s) => (s === "idle" ? "idle" : "ended"));
       };
@@ -379,6 +431,7 @@ function App() {
   function stop() {
     stopMic();
     if (listener) {
+      clearPlayback();
       socket.current?.close();
       context.current?.close();
       context.current = null;
@@ -451,6 +504,7 @@ function App() {
     waiting: "Warte auf den Sprecher",
     ended: "Sitzung pausiert",
     draining: "Letzte Worte werden übersetzt",
+    error: "Diese Sprache ist momentan nicht verfügbar",
   };
   const pillLabel: Record<Status, string> = {
     idle: "Bereit",
@@ -459,6 +513,7 @@ function App() {
     waiting: "Wartet",
     ended: "Pausiert",
     draining: "Beendet",
+    error: "Unterbrochen",
   };
   return (
     <div className="app">
@@ -484,7 +539,7 @@ function App() {
           <h1>
             {listener ? (
               <>
-                Eine Sprache.
+                Deine Sprache.
                 <br />
                 <span>Alle verbunden.</span>
               </>
@@ -512,11 +567,11 @@ function App() {
           />
           <ArrowRight size={16} className="language-arrow" aria-hidden="true" />
           <ChipSelect
-            label="Übersetzt"
+            label={listener ? "Ich höre" : "Standardsprache"}
             value={language}
             options={languageOptions}
-            disabled={!!room}
-            onChange={setLanguage}
+            disabled={!listener && !!room}
+            onChange={chooseLanguage}
           />
         </div>
         <section className="stage" aria-label="Live-Audio">
@@ -656,7 +711,7 @@ function App() {
             </button>
           </div>
         )}
-        <section className={"transcripts " + (listener ? "single" : "")}>
+        <section className="transcripts single">
           {!listener && (
             <article className="card glass">
               <div className="card-label">
@@ -667,15 +722,16 @@ function App() {
               <div className="transcript" aria-live="polite">
                 {original || (
                   <span className="placeholder">
-                    {transcription === "ready"
+                    {transcription === "configured"
                       ? "Deine gesprochenen Worte erscheinen hier mit kurzer Verzögerung."
-                      : "Die lokale Spracherkennung wird vorbereitet. Übersetzen ist bereits möglich."}
+                      : "Die Cloud-Spracherkennung ist nicht eingerichtet. Übersetzen ist weiterhin möglich."}
                   </span>
                 )}
+                <div ref={listener ? undefined : transcriptEnd} />
               </div>
             </article>
           )}
-          <article className="card glass translation">
+          {listener && <article className="card glass translation">
             <div className="card-label">
               <AudioLines size={15} />
               Live-Übersetzung
@@ -691,7 +747,7 @@ function App() {
               )}
               <div ref={transcriptEnd} />
             </div>
-          </article>
+          </article>}
         </section>
         {room && !listener && (
           <button className="invite glass" onClick={() => setShare(true)}>

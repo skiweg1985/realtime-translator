@@ -1,32 +1,34 @@
 """Single-worker, ephemeral rooms bridging browsers to LiteLLM Translate."""
 import asyncio
-import base64
 import contextlib
 import json
 import os
 import secrets
 import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from transcription import stream_captions
+from channels import TranslationChannel
+
+MAX_LANGUAGES = 4
 
 LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'tr', 'ar', 'ja', 'zh'}
 URL = os.getenv('TRANSLATE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime/translations?model=azure-live-translate')
 KEY = os.getenv('TRANSLATE_KEY', '')
-model = None
-model_status = 'loading'
-transcribe_lock = asyncio.Lock()
+TRANSCRIBE_URL = os.getenv('TRANSCRIBE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime?model=azure-live-transcribe&intent=transcription')
+TRANSCRIBE_MODEL = os.getenv('TRANSCRIBE_MODEL', 'azure-live-transcribe')
+TRANSCRIBE_KEY = os.getenv('TRANSCRIBE_KEY', '')
 
 @dataclass(eq=False)
 class Peer:
     ws: WebSocket
+    language: str | None = None
+    subscription: int = 0
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=100))
 
 @dataclass
@@ -37,31 +39,19 @@ class Room:
     created: float = field(default_factory=time.monotonic)
     active: bool = False
     peers: set = field(default_factory=set)
-    text: str = ''
+    translations: dict = field(default_factory=dict)
+    channels: dict = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    draining: bool = False
     original: str = ''
 
 rooms: dict[str, Room] = {}
 
-def load_model():
-    global model, model_status
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(os.getenv('WHISPER_MODEL', 'tiny'), device='cpu', compute_type='int8', cpu_threads=4)
-        model_status = 'ready'
-    except Exception:
-        model_status = 'unavailable'
-
-@asynccontextmanager
-async def lifespan(app):
-    task = asyncio.create_task(asyncio.to_thread(load_model))
-    yield
-    task.cancel()
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 @app.get('/api/health')
 def health():
-    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': model_status}
+    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIBE_KEY else 'unavailable'}
 
 class NewRoom(BaseModel):
     language: str = 'en'
@@ -91,115 +81,149 @@ def room_info(room_id: str):
     room = rooms.get(room_id)
     if not room:
         raise HTTPException(404, 'Diese Sitzung ist nicht mehr verfügbar.')
-    return {'language': room.language, 'source': room.source, 'active': room.active}
+    return {'language': room.language, 'source': room.source, 'active': room.active,
+            'languages': sorted(LANGUAGES), 'max_languages': MAX_LANGUAGES}
 
-async def broadcast(room, event):
+async def broadcast(room, event, language=None):
     for peer in list(room.peers):
+        if language is not None and peer.language != language:
+            continue
         try:
-            peer.queue.put_nowait(event)
+            peer.queue.put_nowait({**event, 'language': language, 'subscription': peer.subscription} if language else event)
         except asyncio.QueueFull:
             room.peers.discard(peer)
             await peer.ws.close(code=1013, reason='Verbindung zu langsam. Bitte erneut beitreten.')
 
 async def send_peer(peer):
     while True:
-        await peer.ws.send_json(await peer.queue.get())
+        event = await peer.queue.get()
+        if event.get('language') and event['type'] != 'subscription_rejected' and (event['language'] != peer.language or event.get('subscription') != peer.subscription):
+            continue
+        await peer.ws.send_json(event)
 
 async def counts(room):
     await broadcast(room, {'type': 'listeners', 'count': max(0, len(room.peers) - int(room.active))})
 
 async def transcribe_audio(room, queue):
-    while True:
-        pcm = await queue.get()
-        if model is None:
-            continue
-        def run():
-            samples = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768
-            # Whisper consumes 16 kHz, input is 24 kHz PCM.
-            samples = np.interp(np.arange(0, len(samples), 1.5), np.arange(len(samples)), samples).astype(np.float32)
-            segments, _ = model.transcribe(samples, language=room.source, beam_size=1, vad_filter=True, condition_on_previous_text=False)
-            return ' '.join(s.text.strip() for s in segments).strip()
-        try:
-            async with transcribe_lock:
-                text = await asyncio.to_thread(run)
-            if text:
-                room.original = (room.original + ' ' + text).strip()[-20000:]
-                await broadcast(room, {'type': 'original', 'text': room.original})
-        except Exception:
-            await broadcast(room, {'type': 'notice', 'message': 'Originaltext ist momentan nicht verfügbar. Die Übersetzung läuft weiter.'})
-
-async def translation(room, ws):
-    audio_queue = asyncio.Queue(maxsize=6)
-    transcriber = asyncio.create_task(transcribe_audio(room, audio_queue))
+    async def publish(text):
+        room.original = text
+        await broadcast(room, {'type': 'original', 'text': text})
     try:
-        async with websockets.connect(URL, additional_headers={'Authorization': 'Bearer ' + KEY}, proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as upstream:
-            await upstream.send(json.dumps({'type': 'session.update', 'session': {'audio': {'output': {'language': room.language}}}}))
-            async with asyncio.timeout(20):
-                while True:
-                    event = json.loads(await upstream.recv())
-                    if event.get('type') == 'error':
-                        raise RuntimeError('Session rejected')
-                    if event.get('type') == 'session.updated':
-                        break
-            await broadcast(room, {'type': 'status', 'status': 'live'})
-            async def receive():
-                async for raw in upstream:
-                    event = json.loads(raw)
-                    kind = event.get('type')
-                    if kind == 'session.output_audio.delta':
-                        await broadcast(room, {'type': 'audio', 'delta': event['delta']})
-                    elif kind == 'session.output_transcript.delta':
-                        room.text = (room.text + event['delta'])[-20000:]
-                        await broadcast(room, {'type': 'translation', 'text': room.text})
-                    elif kind == 'error':
-                        raise RuntimeError('Upstream error')
-            async def send():
-                buffer = bytearray()
-                silent = 0
-                def enqueue():
-                    if len(buffer) >= 24000:
+        await stream_captions(queue, TRANSCRIBE_URL, TRANSCRIBE_KEY, TRANSCRIBE_MODEL,
+                              room.source, room.original, publish)
+    except Exception:
+        await broadcast(room, {'type': 'notice', 'message': 'Cloud-Spracherkennung ist momentan nicht verfügbar. Die Übersetzung läuft weiter.'})
+
+def channel_status(room, language):
+    channel = room.channels.get(language)
+    return channel.status if channel else ('ended' if room.draining else 'waiting')
+
+
+def ensure_channel(room, language):
+    if not room.active or room.draining or language in room.channels:
+        return
+    async def publish(event):
+        if event['type'] == 'translation_delta':
+            room.translations[language] = (room.translations.get(language, '') + event['delta'])[-20000:]
+            event = {'type': 'translation', 'text': room.translations[language]}
+        await broadcast(room, event, language)
+    channel = TranslationChannel(language, URL, KEY, publish)
+    room.channels[language] = channel
+    channel.start()
+
+
+async def prune_channels(room):
+    # Caller holds room.lock. Keep the slot occupied until its upstream is closed.
+    wanted = {p.language for p in room.peers if p.language}
+    for language in list(room.channels):
+        if language not in wanted:
+            await room.channels[language].close()
+            del room.channels[language]
+
+
+async def subscribe(room, peer, language, subscription):
+    if language not in LANGUAGES or type(subscription) is not int or not 0 <= subscription <= 2147483647:
+        raise ValueError('Invalid subscription')
+    async with room.lock:
+        wanted = {p.language for p in room.peers if p is not peer and p.language}
+        if len(wanted | {language}) > MAX_LANGUAGES:
+            await peer.queue.put({'type': 'subscription_rejected', 'subscription': subscription,
+                                  'language': peer.language, 'active_subscription': peer.subscription,
+                                  'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language), 'message': 'Es sind bereits vier Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
+            return False
+        peer.language = language
+        peer.subscription = subscription
+        await prune_channels(room)
+        # Explicit resubscription retries a failed channel for all its listeners.
+        channel = room.channels.get(language)
+        if channel and channel.task.done():
+            await channel.close()
+            del room.channels[language]
+        ensure_channel(room, language)
+        await peer.queue.put({'type': 'snapshot', 'language': language, 'subscription': subscription,
+                              'text': room.translations.get(language, ''), 'original': room.original,
+                              'status': channel_status(room, language)})
+        return True
+
+
+async def translation(room, ws, speaker):
+    audio_queue = asyncio.Queue(maxsize=100)
+    transcriber = asyncio.create_task(transcribe_audio(room, audio_queue))
+    async with room.lock:
+        room.draining = False
+        for language in {p.language for p in room.peers if p.language}:
+            ensure_channel(room, language)
+    await speaker.queue.put({'type': 'status', 'status': 'live'})
+    try:
+        async with asyncio.timeout(600):
+            while True:
+                message = await ws.receive()
+                if message['type'] == 'websocket.disconnect':
+                    raise WebSocketDisconnect()
+                pcm = message.get('bytes')
+                if pcm is not None:
+                    if len(pcm) != 4800:
+                        raise ValueError('Invalid audio frame')
+                    if not transcriber.done():
                         try:
-                            audio_queue.put_nowait(bytes(buffer))
+                            audio_queue.put_nowait(pcm)
                         except asyncio.QueueFull:
-                            pass
-                    buffer.clear()
-                while True:
-                    message = await ws.receive()
-                    if message['type'] == 'websocket.disconnect':
-                        raise WebSocketDisconnect()
-                    pcm = message.get('bytes')
-                    if pcm is not None:
-                        if len(pcm) != 4800:
-                            raise ValueError('Invalid audio frame')
-                        buffer.extend(pcm)
-                        rms = np.sqrt(np.mean((np.frombuffer(pcm, dtype='<i2').astype(float) / 32768)**2))
-                        silent = silent + 1 if rms < .012 else 0
-                        if (silent >= 7 and len(buffer) >= 48000) or len(buffer) >= 384000:
-                            enqueue()
-                        await upstream.send(json.dumps({'type': 'session.input_audio_buffer.append', 'audio': base64.b64encode(pcm).decode()}))
-                    elif message.get('text') == 'stop':
-                        enqueue()
-                        # Let final words complete using the same drain protocol as the acceptance client.
-                        for _ in range(30):
-                            await upstream.send(json.dumps({'type': 'session.input_audio_buffer.append', 'audio': base64.b64encode(bytes(4800)).decode()}))
-                            await asyncio.sleep(.1)
-                        await asyncio.sleep(5)
-                        return
-                    else:
-                        raise ValueError('Invalid message')
-            sender = asyncio.create_task(send())
-            receiver = asyncio.create_task(receive())
-            try:
-                done, _ = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED, timeout=600)
-                for task in done:
-                    task.result()
-            finally:
-                sender.cancel()
-                receiver.cancel()
-                await asyncio.gather(sender, receiver, return_exceptions=True)
+                            transcriber.cancel()
+                            await speaker.queue.put({'type': 'notice', 'message': 'Cloud-Spracherkennung kommt nicht nach. Bitte die Sitzung erneut starten.'})
+                    for language, channel in list(room.channels.items()):
+                        if channel.feed(pcm) is False:
+                            await broadcast(room, {'type': 'status', 'status': 'error'}, language)
+                            await broadcast(room, {'type': 'error', 'message': 'Diese Übersetzung kommt nicht nach. Bitte erneut verbinden.'}, language)
+                elif message.get('text') == 'stop':
+                    break
+                else:
+                    raise ValueError('Invalid message')
+    except TimeoutError:
+        pass
     finally:
-        transcriber.cancel()
-        await asyncio.gather(transcriber, return_exceptions=True)
+        async with room.lock:
+            room.draining = True
+        try:
+            if not transcriber.done():
+                try:
+                    audio_queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    transcriber.cancel()
+            for channel in list(room.channels.values()):
+                channel.feed(None)
+            tasks = [transcriber] + [c.task for c in room.channels.values()]
+            try:
+                async with asyncio.timeout(22):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except TimeoutError:
+                pass
+        finally:
+            transcriber.cancel()
+            await asyncio.gather(transcriber, return_exceptions=True)
+            async with room.lock:
+                for channel in room.channels.values():
+                    await channel.close()
+                room.channels.clear()
 
 @app.websocket('/api/rooms/{room_id}/ws')
 async def room_socket(ws: WebSocket, room_id: str):
@@ -226,11 +250,15 @@ async def room_socket(ws: WebSocket, room_id: str):
             room.active = True
         room.peers.add(peer)
         sending = asyncio.create_task(send_peer(peer))
-        await peer.queue.put({'type': 'snapshot', 'text': room.text, 'original': room.original, 'status': 'connecting' if owner else ('live' if room.active else 'waiting')})
+        if owner:
+            await peer.queue.put({'type': 'snapshot', 'text': '', 'original': room.original, 'status': 'connecting'})
+        elif not await subscribe(room, peer, auth.get('language', room.language), auth.get('subscription', 0)):
+            await asyncio.sleep(.1)
+            return
         await counts(room)
         if owner:
             try:
-                await translation(room, ws)
+                await translation(room, ws, peer)
             except WebSocketDisconnect:
                 pass
             except Exception:
@@ -241,11 +269,16 @@ async def room_socket(ws: WebSocket, room_id: str):
                 await asyncio.sleep(.1)
         else:
             while True:
-                await ws.receive_text()
+                message = await ws.receive_json()
+                if message.get('type') != 'subscribe':
+                    raise ValueError('Invalid listener message')
+                await subscribe(room, peer, message.get('language'), message.get('subscription'))
     except (WebSocketDisconnect, asyncio.TimeoutError, ValueError):
         pass
     finally:
         room.peers.discard(peer)
+        async with room.lock:
+            await prune_channels(room)
         if sending:
             sending.cancel()
             await asyncio.gather(sending, return_exceptions=True)
