@@ -449,6 +449,7 @@ function App() {
     levels = useRef(new Float32Array(LEVELS)),
     running = useRef(false),
     micOff = useRef(false),
+    flushFrames = useRef(0),
     wake = useRef<any>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
   const t = (key: Key, vars?: Record<string, string>) => translate(ui, key, vars);
@@ -722,7 +723,7 @@ function App() {
             silent.connect(ctx.destination);
             node.port.onmessage = (e) => {
               if (!running.current || ws.readyState !== WebSocket.OPEN) return;
-              if (micOff.current) {
+              if (micOff.current && flushFrames.current <= 0) {
                 pushLevel(0);
                 return;
               }
@@ -730,6 +731,14 @@ function App() {
                 setError(t("errSlow"));
                 stopMic();
                 ws.close();
+                return;
+              }
+              if (micOff.current) {
+                /* Das Modell übersetzt nur weiter, solange Audio ankommt. Nach dem Stummschalten
+                   deshalb kurz Stille nachschieben, damit der angefangene Satz noch fertig wird. */
+                flushFrames.current -= 1;
+                ws.send(new ArrayBuffer(e.data.byteLength));
+                pushLevel(0);
                 return;
               }
               ws.send(e.data);
@@ -775,9 +784,10 @@ function App() {
       socket.current?.send("stop");
     }
   }
-  /* Mikrofon stumm: Track aus und nichts mehr senden, Sitzung bleibt offen. */
+  /* Mikrofon stumm: Track aus, fünf Sekunden Stille nachschieben, dann nichts mehr senden. */
   function setMic(on: boolean) {
     micOff.current = !on;
+    flushFrames.current = on ? 0 : 50;
     setMicMuted(!on);
     stream.current?.getAudioTracks().forEach((track) => (track.enabled = on));
     if (!on) pushLevel(0);
