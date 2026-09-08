@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   Mic,
+  MicOff,
   Headphones,
   Captions as CaptionsIcon,
   BookOpen,
@@ -13,6 +14,7 @@ import {
   X,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   Link,
   Share,
   Loader2,
@@ -21,10 +23,12 @@ import {
   ALargeSmall,
   Maximize2,
   LogOut,
+  Settings2,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import "@fontsource-variable/inter/opsz.css";
 import "./style.css";
+import { detectLang, translate, type Key, type Lang } from "./i18n";
 
 const languages: Record<string, string> = {
   de: "Deutsch",
@@ -43,20 +47,40 @@ const languages: Record<string, string> = {
 };
 const languageOptions = Object.entries(languages) as [string, string][];
 type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining" | "error";
+type Role = "home" | "speaker" | "listener";
 type Mode = "both" | "audio" | "text";
 type Size = "normal" | "large" | "xl";
-type SheetKind = "language" | "share" | "textSize" | "device" | "audio" | null;
-const sizes: Record<Size, { label: string; short: string; scale: number; preview: number }> = {
-  normal: { label: "Normal", short: "Normal", scale: 1, preview: 17 },
-  large: { label: "Groß", short: "Groß", scale: 1.25, preview: 22 },
-  xl: { label: "Extra groß", short: "XL", scale: 1.6, preview: 28 },
+type Theme = "system" | "light" | "dark";
+type SheetKind = "language" | "share" | "textSize" | "device" | "audio" | "settings" | "join" | null;
+const sizes: Record<Size, { label: Key; short: Key; scale: number; preview: number }> = {
+  normal: { label: "sizeNormal", short: "sizeNormal", scale: 1, preview: 17 },
+  large: { label: "sizeLarge", short: "sizeLarge", scale: 1.25, preview: 22 },
+  xl: { label: "sizeXl", short: "sizeXlShort", scale: 1.6, preview: 28 },
 };
-const modes: { key: Mode; label: string; icon: React.ReactNode }[] = [
-  { key: "both", label: "Ton + Text", icon: <CaptionsIcon size={20} /> },
-  { key: "audio", label: "Ton", icon: <Headphones size={20} /> },
-  { key: "text", label: "Text", icon: <BookOpen size={20} /> },
+const modes: { key: Mode; label: Key; icon: React.ReactNode }[] = [
+  { key: "both", label: "modeBoth", icon: <CaptionsIcon size={20} /> },
+  { key: "audio", label: "modeAudio", icon: <Headphones size={20} /> },
+  { key: "text", label: "modeText", icon: <BookOpen size={20} /> },
+];
+const themes: { key: Theme; label: Key }[] = [
+  { key: "system", label: "themeSystem" },
+  { key: "light", label: "themeLight" },
+  { key: "dark", label: "themeDark" },
 ];
 const LEVELS = 48;
+
+function stored(key: string) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
 
 /* Den laufenden Text in Verlauf und aktuellen Satz teilen. */
 function splitCaption(text: string) {
@@ -72,25 +96,17 @@ function splitCaption(text: string) {
   return { history: t.slice(0, cut).trimEnd(), current: t.slice(cut) };
 }
 
-/* Browser-Fehler beim Mikrofonzugriff in verständliche Hinweise übersetzen. */
-function describeError(e: unknown) {
-  const name = e instanceof DOMException ? e.name : "";
-  if (name === "NotAllowedError" || name === "PermissionDeniedError")
-    return "Mikrofonzugriff wurde abgelehnt. Bitte in den Browser-Einstellungen erlauben.";
-  if (name === "NotFoundError" || name === "OverconstrainedError")
-    return "Kein passendes Mikrofon gefunden. Bitte ein anderes Gerät wählen.";
-  if (name === "NotReadableError")
-    return "Das Mikrofon wird gerade von einer anderen App verwendet.";
-  return e instanceof Error && e.message
-    ? e.message
-    : "Mikrofon konnte nicht gestartet werden.";
+/* Eine Raum-ID aus einem eingefügten Link oder Text holen. */
+function roomFromText(value: string) {
+  const match = value.match(/room=([A-Za-z0-9_-]{8,})/) || value.trim().match(/^([A-Za-z0-9_-]{16,})$/);
+  return match ? match[1] : "";
 }
 
 function reducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-/* Pegelanzeige aus echten Audiodaten: die letzten Werte als Balken. */
+/* Pegelanzeige aus echten Audiodaten: die letzten Werte als Balken über einer Grundlinie. */
 function LevelMeter({
   levels,
   active,
@@ -121,7 +137,6 @@ function LevelMeter({
         n = data.length,
         gap = 3,
         bw = Math.max(2, (w - gap * (n - 1)) / n);
-      // Ruhende Grundlinie; bei Ton wachsen die Balken daraus heraus.
       ctx.globalAlpha = 0.22;
       ctx.fillRect(0, Math.round(h / 2), w, 1);
       if (!active) return;
@@ -174,10 +189,12 @@ function Captions({
 /* Bottom Sheet auf dem Telefon, Dialog auf großen Screens. Escape, Tipp daneben und Wischen schließen. */
 function Sheet({
   title,
+  closeLabel,
   onClose,
   children,
 }: {
   title: string;
+  closeLabel: string;
   onClose: () => void;
   children: React.ReactNode;
 }) {
@@ -227,7 +244,7 @@ function Sheet({
         <div className="grabber" aria-hidden="true" />
         <div className="sheet-head">
           <h2>{title}</h2>
-          <button className="close" onClick={onClose} aria-label="Schließen">
+          <button className="close" onClick={onClose} aria-label={closeLabel}>
             <X size={22} />
           </button>
         </div>
@@ -264,13 +281,45 @@ function Option({
   );
 }
 
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T;
+  options: { key: T; label: string; icon?: React.ReactNode }[];
+  onChange: (value: T) => void;
+  label: string;
+}) {
+  return (
+    <div className="segmented" role="radiogroup" aria-label={label}>
+      {options.map((o) => (
+        <button key={o.key} role="radio" aria-checked={value === o.key} onClick={() => onChange(o.key)}>
+          {o.icon}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function App() {
   const params = new URLSearchParams(location.hash.slice(1));
   const [room, setRoom] = useState(params.get("room") || "");
   const [owner, setOwner] = useState(
     sessionStorage.getItem("owner:" + room) || "",
   );
-  const listener = !!room && !owner;
+  const [role, setRole] = useState<Role>(room ? (owner ? "speaker" : "listener") : "home");
+  const listener = role === "listener";
+  const [ui, setUi] = useState<Lang>(() => {
+    const saved = stored("translate:ui");
+    return saved === "de" || saved === "en" ? saved : detectLang();
+  });
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = stored("translate:theme");
+    return saved === "light" || saved === "dark" ? saved : "system";
+  });
   const [source, setSource] = useState("de"),
     [language, setLanguage] = useState("en");
   const selectedLanguage = useRef("en"), subscription = useRef(0);
@@ -283,6 +332,7 @@ function App() {
   const [count, setCount] = useState(0),
     [copied, setCopied] = useState(false);
   const [muted, setMuted] = useState(false),
+    [micMuted, setMicMuted] = useState(false),
     [elapsed, setElapsed] = useState(0);
   const [audioInfo, setAudioInfo] = useState({ chunks: 0, peak: 0, state: "nicht gestartet" });
   const [toneResult, setToneResult] = useState("");
@@ -291,16 +341,14 @@ function App() {
     [device, setDevice] = useState("");
   const [mode, setMode] = useState<Mode>("both");
   const [size, setSize] = useState<Size>(() => {
-    try {
-      const saved = localStorage.getItem("translate:size");
-      return saved && saved in sizes ? (saved as Size) : "normal";
-    } catch {
-      return "normal";
-    }
+    const saved = stored("translate:size");
+    return saved && saved in sizes ? (saved as Size) : "normal";
   });
   const [focus, setFocus] = useState(false);
   const [sheet, setSheet] = useState<SheetKind>(null);
   const [langTab, setLangTab] = useState<"source" | "target">("target");
+  const [joinText, setJoinText] = useState(""),
+    [joinError, setJoinError] = useState("");
   const socket = useRef<WebSocket | null>(null),
     context = useRef<AudioContext | null>(null),
     stream = useRef<MediaStream | null>(null);
@@ -310,8 +358,10 @@ function App() {
   const route = useRef<HTMLDivElement>(null),
     levels = useRef(new Float32Array(LEVELS)),
     running = useRef(false),
+    micOff = useRef(false),
     wake = useRef<any>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
+  const t = (key: Key, vars?: Record<string, string>) => translate(ui, key, vars);
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
@@ -357,11 +407,23 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [focus, sheet]);
+  useEffect(() => store("translate:size", size), [size]);
   useEffect(() => {
-    try {
-      localStorage.setItem("translate:size", size);
-    } catch {}
-  }, [size]);
+    store("translate:ui", ui);
+    document.documentElement.lang = ui;
+  }, [ui]);
+  useEffect(() => {
+    store("translate:theme", theme);
+    const root = document.documentElement;
+    if (theme === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", theme);
+    // Die Browserleiste folgt der gewählten Darstellung.
+    document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((meta) => {
+      const light = meta.media.includes("light");
+      const forced = theme === "light" ? "#f6f6f6" : theme === "dark" ? "#111111" : "";
+      meta.content = forced || (light ? "#f6f6f6" : "#111111");
+    });
+  }, [theme]);
   useEffect(
     () => () => {
       socket.current?.close();
@@ -385,6 +447,13 @@ function App() {
     data.copyWithin(0, 1);
     data[data.length - 1] = value;
     route.current?.style.setProperty("--energy", String(value));
+  }
+  function describeError(e: unknown) {
+    const name = e instanceof DOMException ? e.name : "";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") return t("errMicDenied");
+    if (name === "NotFoundError" || name === "OverconstrainedError") return t("errMicNotFound");
+    if (name === "NotReadableError") return t("errMicBusy");
+    return e instanceof Error && e.message ? e.message : t("errMicGeneric");
   }
   function stopMic() {
     running.current = false;
@@ -427,7 +496,7 @@ function App() {
     node.onended = () => { audioNodes.current.delete(node); node.disconnect(); };
     nextAudio.current = Math.max(ctx.currentTime + 0.04, nextAudio.current);
     if (nextAudio.current - ctx.currentTime > 3) {
-      setNotice("Die Audioausgabe hängt zurück. Bitte erneut beitreten.");
+      setNotice(t("noticeBehind"));
       socket.current?.close();
       return;
     }
@@ -475,10 +544,7 @@ function App() {
       let id = room,
         secret = owner;
       if (!listener) {
-        if (!navigator.mediaDevices?.getUserMedia)
-          throw Error(
-            "Mikrofon benötigt HTTPS und ein vertrauenswürdiges Zertifikat.",
-          );
+        if (!navigator.mediaDevices?.getUserMedia) throw Error(t("errHttps"));
         stream.current = await navigator.mediaDevices.getUserMedia({
           audio: {
             deviceId: device ? { exact: device } : undefined,
@@ -501,8 +567,7 @@ function App() {
             body: JSON.stringify({ source, language }),
           });
           const data = await response.json();
-          if (!response.ok)
-            throw Error(data.detail || "Sitzung konnte nicht erstellt werden.");
+          if (!response.ok) throw Error(data.detail || t("errRoom"));
           id = data.id;
           secret = data.owner;
           sessionStorage.setItem("owner:" + id, secret);
@@ -565,10 +630,12 @@ function App() {
             silent.connect(ctx.destination);
             node.port.onmessage = (e) => {
               if (!running.current || ws.readyState !== WebSocket.OPEN) return;
+              if (micOff.current) {
+                pushLevel(0);
+                return;
+              }
               if (ws.bufferedAmount > 48000) {
-                setError(
-                  "Die Verbindung ist zu langsam. Bitte erneut starten.",
-                );
+                setError(t("errSlow"));
                 stopMic();
                 ws.close();
                 return;
@@ -591,9 +658,7 @@ function App() {
       };
       ws.onerror = () => {
         if (socket.current !== ws) return;
-        setError(
-          "Verbindung fehlgeschlagen. Bitte Netzwerk und Zertifikat prüfen.",
-        );
+        setError(t("errConnection"));
       };
       ws.onclose = () => {
         if (socket.current !== ws) return;
@@ -618,13 +683,20 @@ function App() {
       socket.current?.send("stop");
     }
   }
+  /* Mikrofon stumm: Track aus und nichts mehr senden, Sitzung bleibt offen. */
+  function setMic(on: boolean) {
+    micOff.current = !on;
+    setMicMuted(!on);
+    stream.current?.getAudioTracks().forEach((track) => (track.enabled = on));
+    if (!on) pushLevel(0);
+  }
   async function copy() {
     try {
       await navigator.clipboard.writeText(link);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      setNotice("Bitte den Link im Teilen-Fenster kopieren.");
+      setNotice(t("noticeCopy"));
     }
   }
   async function shareLink() {
@@ -645,8 +717,8 @@ function App() {
       tone.connect(gain); gain.connect(ctx.destination);
       tone.start(); tone.stop(ctx.currentTime + 0.4);
       tone.onended = () => { tone.disconnect(); gain.disconnect(); };
-      setToneResult("Testton abgespielt · " + ctx.state);
-    } catch { setToneResult("Safari hat den Testton blockiert."); }
+      setToneResult(t("tonePlayed") + " · " + ctx.state);
+    } catch { setToneResult(t("toneBlocked")); }
   }
   function setAudio(on: boolean) {
     setMuted(!on);
@@ -675,26 +747,35 @@ function App() {
     else setLanguage(code);
     setSheet(null);
   }
+  function join() {
+    const id = roomFromText(joinText);
+    if (!id) {
+      setJoinError(t("joinInvalid"));
+      return;
+    }
+    location.assign("/#room=" + id);
+    location.reload();
+  }
   const statusLabel: Record<Status, string> = {
-    idle: listener ? "Noch nicht verbunden" : "Bereit",
-    connecting: "Verbindet …",
-    live: listener ? "Live" : "Live, du wirst übersetzt",
-    waiting: "Wartet auf den Sprecher",
-    ended: "Pausiert",
-    draining: "Wird beendet …",
-    error: "Sprache gerade nicht verfügbar",
+    idle: listener ? t("statusIdleListener") : t("statusIdleSpeaker"),
+    connecting: t("statusConnecting"),
+    live: listener ? t("statusLiveListener") : micMuted ? t("statusMuted") : t("statusLiveSpeaker"),
+    waiting: t("statusWaiting"),
+    ended: t("statusEnded"),
+    draining: t("statusDraining"),
+    error: t("statusError"),
   };
   const stateLabel: Record<Status, string> = {
-    idle: "Bereit",
-    connecting: "Verbindet",
-    live: "Live",
-    waiting: "Wartet",
-    ended: "Pausiert",
-    draining: "Beendet",
-    error: "Unterbrochen",
+    idle: t("stateIdle"),
+    connecting: t("stateConnecting"),
+    live: t("stateLive"),
+    waiting: t("stateWaiting"),
+    ended: t("stateEnded"),
+    draining: t("stateDraining"),
+    error: t("stateError"),
   };
   const deviceLabel =
-    devices.find((d) => d.deviceId === device)?.label || "Standardmikrofon";
+    devices.find((d) => d.deviceId === device)?.label || t("micDefault");
   const showText = listener ? mode !== "audio" : true;
   const showAudio = listener && mode !== "text";
   const stateView = (
@@ -704,13 +785,18 @@ function App() {
       {status === "live" && <span className="timer">{clock}</span>}
     </div>
   );
+  const settingsButton = (
+    <button className="iconbtn" onClick={() => setSheet("settings")} aria-label={t("settings")}>
+      <Settings2 size={22} />
+    </button>
+  );
   const alerts = (
     <>
       {error && (
         <div className="alert" role="alert">
           <AlertCircle size={18} aria-hidden="true" />
           <span>{error}</span>
-          <button className="dismiss" onClick={() => setError("")} aria-label="Meldung schließen">
+          <button className="dismiss" onClick={() => setError("")} aria-label={t("dismissError")}>
             <X size={18} />
           </button>
         </div>
@@ -719,7 +805,7 @@ function App() {
         <div className="notice">
           <Info size={18} aria-hidden="true" />
           <span>{notice}</span>
-          <button className="dismiss" onClick={() => setNotice("")} aria-label="Hinweis schließen">
+          <button className="dismiss" onClick={() => setNotice("")} aria-label={t("dismissNotice")}>
             <X size={18} />
           </button>
         </div>
@@ -728,7 +814,7 @@ function App() {
   );
   const sourceLang = (
     <>
-      <small>Gesprochen</small>
+      <small>{t("spoken")}</small>
       <span className="lang-value">
         <span>{languages[source]}</span>
         {!listener && !languagesLocked && <ChevronDown size={18} aria-hidden="true" />}
@@ -737,13 +823,224 @@ function App() {
   );
   const targetLang = (
     <>
-      <small>{listener ? "Ich höre" : "Übersetzt"}</small>
+      <small>{listener ? t("hearing") : t("translated")}</small>
       <span className="lang-value">
         <span>{languages[language]}</span>
         {(listener || !languagesLocked) && <ChevronDown size={18} aria-hidden="true" />}
       </span>
     </>
   );
+  const brand = session ? (
+    <span className="brand">
+      Translate<b>Live</b>
+    </span>
+  ) : (
+    <a className="brand" href="/" aria-label={t("brandHome")}>
+      Translate<b>Live</b>
+    </a>
+  );
+  const sheets = (
+    <>
+      {sheet === "settings" && (
+        <Sheet title={t("settings")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <p className="field-label">{t("settingsLanguage")}</p>
+          <Segmented
+            value={ui}
+            label={t("settingsLanguage")}
+            options={[
+              { key: "de" as Lang, label: "Deutsch" },
+              { key: "en" as Lang, label: "English" },
+            ]}
+            onChange={setUi}
+          />
+          <p className="field-label">{t("settingsTheme")}</p>
+          <Segmented
+            value={theme}
+            label={t("settingsTheme")}
+            options={themes.map((th) => ({ key: th.key, label: t(th.label) }))}
+            onChange={setTheme}
+          />
+        </Sheet>
+      )}
+      {sheet === "join" && (
+        <Sheet title={t("joinTitle")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <p>{t("joinHint")}</p>
+          <form
+            className="join"
+            onSubmit={(e) => {
+              e.preventDefault();
+              join();
+            }}
+          >
+            <input
+              aria-label={t("joinPlaceholder")}
+              placeholder={t("joinPlaceholder")}
+              value={joinText}
+              inputMode="url"
+              autoComplete="off"
+              autoCapitalize="off"
+              onChange={(e) => {
+                setJoinText(e.target.value);
+                setJoinError("");
+              }}
+            />
+            {joinError && <p className="field-error" role="alert">{joinError}</p>}
+            <button className="btn btn-primary" type="submit" disabled={!joinText.trim()}>
+              <Headphones size={18} />
+              <span>{t("joinButton")}</span>
+            </button>
+          </form>
+        </Sheet>
+      )}
+      {sheet === "language" && (
+        <Sheet title={listener ? t("hearing") : t("sheetLanguages")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          {listener ? (
+            <p>{t("spokenIs", { lang: languages[source] })}</p>
+          ) : (
+            <>
+              <p>{t("listenersChoose")}</p>
+              <Segmented
+                value={langTab}
+                label={t("whichLanguage")}
+                options={[
+                  { key: "source" as const, label: t("spoken") },
+                  { key: "target" as const, label: t("translated") },
+                ]}
+                onChange={setLangTab}
+              />
+            </>
+          )}
+          <div className="options" role="radiogroup" aria-label={t("language")}>
+            {languageOptions.map(([code, name]) => (
+              <Option
+                key={code}
+                label={name}
+                selected={(listener || langTab === "target" ? language : source) === code}
+                onSelect={() => pickLanguage(code)}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "textSize" && (
+        <Sheet title={t("sizeTitle")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <div className="options" role="radiogroup" aria-label={t("sizeTitle")}>
+            {(Object.keys(sizes) as Size[]).map((key) => (
+              <Option
+                key={key}
+                label={t(sizes[key].label)}
+                preview={<span className="preview" style={{ fontSize: sizes[key].preview }} aria-hidden="true">Aa</span>}
+                selected={size === key}
+                onSelect={() => {
+                  setSize(key);
+                  setSheet(null);
+                }}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "device" && (
+        <Sheet title={t("micUnnamed")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <div className="options" role="radiogroup" aria-label={t("micUnnamed")}>
+            <Option label={t("micDefault")} selected={device === ""} onSelect={() => { setDevice(""); setSheet(null); }} />
+            {devices.map((d) => (
+              <Option
+                key={d.deviceId}
+                label={d.label || t("micUnnamed")}
+                selected={device === d.deviceId}
+                onSelect={() => {
+                  setDevice(d.deviceId);
+                  setSheet(null);
+                }}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "audio" && (
+        <Sheet title={t("audioCheck")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <dl className="diag">
+            <dt>{t("diagPackets")}</dt>
+            <dd>{audioInfo.chunks}</dd>
+            <dt>{t("diagLevel")}</dt>
+            <dd>{audioInfo.peak} %</dd>
+            <dt>{t("diagPlayback")}</dt>
+            <dd>{audioInfo.state}</dd>
+            <dt>{t("diagSound")}</dt>
+            <dd>{muted ? t("diagOff") : t("diagOn")}</dd>
+          </dl>
+          <div className="tone">
+            <button className="btn btn-secondary" onClick={testTone}>
+              <Volume2 size={18} />
+              <span>{t("testTone")}</span>
+            </button>
+            <span>{toneResult}</span>
+          </div>
+          <small>{t("diagRoute")}</small>
+        </Sheet>
+      )}
+      {sheet === "share" && (
+        <Sheet title={t("invite")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          <p>{t("shareHint")}</p>
+          <div className="qr">
+            {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
+            <div>
+              <QRCodeSVG value={link} size={168} level="M" bgColor="#ffffff" fgColor="#111111" />
+            </div>
+          </div>
+          <div className="link-row">
+            <input readOnly aria-label={t("shareLinkLabel")} value={link} onFocus={(e) => e.target.select()} />
+            <button className="btn btn-secondary btn-icon" onClick={copy} aria-label={copied ? t("copied") : t("copy")}>
+              {copied ? <Check size={18} /> : <Link size={18} />}
+            </button>
+          </div>
+          <button className="btn btn-primary" onClick={canShare ? shareLink : copy}>
+            {canShare ? <Share size={18} /> : copied ? <Check size={18} /> : <Link size={18} />}
+            <span>{canShare ? t("share") : copied ? t("copied") : t("copy")}</span>
+          </button>
+          <small>{t("shareNetwork")}</small>
+        </Sheet>
+      )}
+    </>
+  );
+  if (role === "home")
+    return (
+      <div className="app is-home">
+        <header className="topbar">
+          {brand}
+          {settingsButton}
+        </header>
+        <main>
+          <div className="column">
+            <p className="intro">{t("homeIntro")}</p>
+            <div className="choices">
+              <button className="choice" onClick={() => setRole("speaker")}>
+                <Mic size={28} aria-hidden="true" />
+                <span className="choice-text">
+                  <strong>{t("homeSpeak")}</strong>
+                  <small>{t("homeSpeakDesc")}</small>
+                </span>
+                <ChevronRight size={22} aria-hidden="true" />
+              </button>
+              <button className="choice" onClick={() => setSheet("join")}>
+                <Headphones size={28} aria-hidden="true" />
+                <span className="choice-text">
+                  <strong>{t("homeListen")}</strong>
+                  <small>{t("homeListenDesc")}</small>
+                </span>
+                <ChevronRight size={22} aria-hidden="true" />
+              </button>
+            </div>
+            <footer>
+              <span>{t("footerPrivacy")}</span>
+              <a href="/local-ca.cer">{t("footerCert")}</a>
+            </footer>
+          </div>
+        </main>
+        {sheets}
+      </div>
+    );
   return (
     <div
       className={[
@@ -763,10 +1060,11 @@ function App() {
           </>
         ) : (
           <>
-            <a className="brand" href="/" aria-label="Translate Live, Startseite">
-              Translate<b>Live</b>
-            </a>
-            {stateView}
+            {brand}
+            <div className="topbar-right">
+              {stateView}
+              {settingsButton}
+            </div>
           </>
         )}
       </header>
@@ -775,7 +1073,7 @@ function App() {
           {!focus && (
             <div ref={route} className={"route " + status}>
               {!listener && !languagesLocked ? (
-                <button className="lang lang-source" onClick={() => openLanguages("source")} aria-label={"Gesprochene Sprache: " + languages[source] + ", ändern"}>
+                <button className="lang lang-source" onClick={() => openLanguages("source")} aria-label={t("changeSpoken", { lang: languages[source] })}>
                   {sourceLang}
                 </button>
               ) : (
@@ -783,7 +1081,7 @@ function App() {
               )}
               <span className="route-line" aria-hidden="true" />
               {listener || !languagesLocked ? (
-                <button className="lang lang-target" onClick={() => openLanguages("target")} aria-label={(listener ? "Ich höre " : "Übersetzt nach ") + languages[language] + ", ändern"}>
+                <button className="lang lang-target" onClick={() => openLanguages("target")} aria-label={t(listener ? "changeHearing" : "changeTranslated", { lang: languages[language] })}>
                   {targetLang}
                 </button>
               ) : (
@@ -791,20 +1089,14 @@ function App() {
               )}
             </div>
           )}
-          {!session && (
-            <p className="intro">
-              {listener
-                ? "Du hörst die Übersetzung und liest mit. Unten wählst du Ton, Text oder beides."
-                : "Sprich normal. Zuhörer hören die Übersetzung und lesen mit."}
-            </p>
-          )}
+          {!session && <p className="intro">{listener ? t("introListener") : t("introSpeaker")}</p>}
           {!listener && (
             <>
               <div className="meta">
                 <span>{statusLabel[status]}</span>
                 {room && (
                   <span>
-                    <strong>{count}</strong> {count === 1 ? "Zuhörer" : "Zuhörer"}
+                    <strong>{count}</strong> {count === 1 ? t("listenersOne") : t("listenersMany")}
                   </span>
                 )}
                 {devices.length > 1 && (
@@ -814,7 +1106,7 @@ function App() {
                   </button>
                 )}
               </div>
-              <LevelMeter levels={levels} active={status === "live"} />
+              <LevelMeter levels={levels} active={status === "live" && !micMuted} />
             </>
           )}
           {showAudio && !focus && (
@@ -823,7 +1115,7 @@ function App() {
                 <LevelMeter levels={levels} active={joined} className="large" />
                 <p className="status-line">{statusLabel[status]}</p>
                 <button className="textbutton" onClick={() => setSheet("audio")}>
-                  Audio prüfen
+                  {t("audioCheck")}
                 </button>
               </div>
             ) : (
@@ -831,7 +1123,7 @@ function App() {
                 <div className="meta">
                   <span>{statusLabel[status]}</span>
                   <button className="textbutton" onClick={() => setSheet("audio")}>
-                    Audio prüfen
+                    {t("audioCheck")}
                   </button>
                 </div>
                 <LevelMeter levels={levels} active={joined} className="small" />
@@ -841,17 +1133,17 @@ function App() {
           {!focus && alerts}
           {showText && (
             <Captions
-              label={listener ? "Übersetzung" : "Deine Worte"}
+              label={listener ? t("captionsTranslation") : t("captionsYourWords")}
               lang={listener ? languages[language] : languages[source]}
               text={listener ? text : original}
               placeholder={
                 listener
                   ? joined
-                    ? "Sobald gesprochen wird, steht die Übersetzung hier."
-                    : "Die Übersetzung erscheint hier, sobald du dabei bist."
+                    ? t("placeholderListenerJoined")
+                    : t("placeholderListenerIdle")
                   : transcription === "configured"
-                    ? "Deine gesprochenen Worte erscheinen hier mit kurzer Verzögerung."
-                    : "Die Spracherkennung ist nicht eingerichtet. Übersetzen geht trotzdem."
+                    ? t("placeholderSpeaker")
+                    : t("placeholderNoCaptions")
               }
               endRef={transcriptEnd}
             />
@@ -859,8 +1151,8 @@ function App() {
           {mode === "audio" && listener && !focus && alerts}
           {!session && (
             <footer>
-              <span>Keine Anmeldung · Keine Aufzeichnung</span>
-              <a href="/local-ca.cer">iPhone-Zertifikat</a>
+              <span>{t("footerPrivacy")}</span>
+              <a href="/local-ca.cer">{t("footerCert")}</a>
             </footer>
           )}
         </div>
@@ -868,76 +1160,85 @@ function App() {
       {focus ? (
         <button className="restore" onClick={() => setFocus(false)}>
           <ChevronUp size={18} aria-hidden="true" />
-          Steuerung anzeigen
+          {t("restore")}
         </button>
       ) : (
         <div className="dock">
           <div className="dock-inner">
             {listener && (
-              <div className="segmented" role="radiogroup" aria-label="Was du bekommst">
-                {modes.map((m) => (
-                  <button key={m.key} role="radio" aria-checked={mode === m.key} onClick={() => switchMode(m.key)}>
-                    {m.icon}
-                    {m.label}
-                  </button>
-                ))}
-              </div>
+              <Segmented
+                value={mode}
+                label={t("modeGroup")}
+                options={modes.map((m) => ({ key: m.key, label: t(m.label), icon: m.icon }))}
+                onChange={switchMode}
+              />
             )}
             <div className="dock-row">
               {listener ? (
                 !joined ? (
                   <button className="btn btn-primary" onClick={start}>
                     {mode === "text" ? <BookOpen size={18} /> : <Headphones size={18} />}
-                    <span>{mode === "text" ? "Mitlesen starten" : "Zuhören starten"}</span>
+                    <span>{mode === "text" ? t("startRead") : t("startListen")}</span>
                   </button>
                 ) : mode === "text" ? (
                   <>
                     <button className="btn btn-secondary" onClick={() => setSheet("textSize")}>
                       <ALargeSmall size={20} />
-                      <span>{sizes[size].short}</span>
+                      <span>{t(sizes[size].short)}</span>
                     </button>
                     <button className="btn btn-secondary" onClick={() => setFocus(true)}>
                       <Maximize2 size={18} />
-                      <span>Fokus</span>
+                      <span>{t("focus")}</span>
                     </button>
                     <button className="btn btn-secondary" onClick={stop} disabled={busy}>
                       <LogOut size={18} />
-                      <span>Verlassen</span>
+                      <span>{t("leave")}</span>
                     </button>
                   </>
                 ) : (
                   <>
                     <button className="btn btn-secondary" onClick={() => setAudio(muted)} aria-pressed={muted}>
                       {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-                      <span>{muted ? "Ton an" : "Ton aus"}</span>
+                      <span>{muted ? t("soundOn") : t("soundOff")}</span>
                     </button>
                     <button className="btn btn-secondary" onClick={stop} disabled={busy}>
                       {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <LogOut size={18} />}
-                      <span>{status === "connecting" ? "Verbindet …" : "Verlassen"}</span>
+                      <span>{status === "connecting" ? t("statusConnecting") : t("leave")}</span>
                     </button>
                   </>
                 )
-              ) : (
+              ) : !active ? (
                 <>
-                  {!active ? (
-                    <button className="btn btn-primary" onClick={start}>
-                      <Mic size={18} />
-                      <span>{status === "ended" ? "Weiter sprechen" : "Sprechen starten"}</span>
-                    </button>
-                  ) : (
-                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
-                      {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Square size={14} fill="currentColor" />}
-                      <span>
-                        {status === "connecting"
-                          ? "Verbindet …"
-                          : status === "draining"
-                            ? "Wird beendet …"
-                            : "Sprechen beenden"}
-                      </span>
+                  <button className="btn btn-primary" onClick={start}>
+                    <Mic size={18} />
+                    <span>{status === "ended" ? t("resume") : t("start")}</span>
+                  </button>
+                  {room && (
+                    <button className="btn btn-secondary btn-icon" onClick={() => setSheet("share")} aria-label={t("invite")}>
+                      <Share size={20} />
                     </button>
                   )}
+                </>
+              ) : (
+                <>
+                  {status === "live" && (
+                    <button className="btn btn-secondary" onClick={() => setMic(micMuted)} aria-pressed={micMuted}>
+                      {micMuted ? <MicOff size={18} /> : <Mic size={18} />}
+                      <span>{micMuted ? t("micOn") : t("micOff")}</span>
+                    </button>
+                  )}
+                  <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                    {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Square size={14} fill="currentColor" />}
+                    <span>
+                      {status === "connecting"
+                        ? t("statusConnecting")
+                        : status === "draining"
+                          ? t("statusDraining")
+                          : t("stopShort")}
+                    </span>
+                  </button>
                   {room && (
-                    <button className="btn btn-secondary btn-icon" onClick={() => setSheet("share")} aria-label="Zuhörer einladen">
+                    <button className="btn btn-secondary btn-icon" onClick={() => setSheet("share")} aria-label={t("invite")}>
                       <Share size={20} />
                     </button>
                   )}
@@ -947,115 +1248,7 @@ function App() {
           </div>
         </div>
       )}
-      {sheet === "language" && (
-        <Sheet title={listener ? "Ich höre" : "Sprachen"} onClose={() => setSheet(null)}>
-          {listener ? (
-            <p>Gesprochen wird {languages[source]}. Wähle, in welcher Sprache du hören und lesen willst.</p>
-          ) : (
-            <>
-              <p>Zuhörer können ihre Sprache später selbst wählen.</p>
-              <div className="segmented" role="radiogroup" aria-label="Welche Sprache ändern">
-                <button role="radio" aria-checked={langTab === "source"} onClick={() => setLangTab("source")}>
-                  Gesprochen
-                </button>
-                <button role="radio" aria-checked={langTab === "target"} onClick={() => setLangTab("target")}>
-                  Übersetzt
-                </button>
-              </div>
-            </>
-          )}
-          <div className="options" role="radiogroup" aria-label="Sprache">
-            {languageOptions.map(([code, name]) => (
-              <Option
-                key={code}
-                label={name}
-                selected={(listener || langTab === "target" ? language : source) === code}
-                onSelect={() => pickLanguage(code)}
-              />
-            ))}
-          </div>
-        </Sheet>
-      )}
-      {sheet === "textSize" && (
-        <Sheet title="Textgröße" onClose={() => setSheet(null)}>
-          <div className="options" role="radiogroup" aria-label="Textgröße">
-            {(Object.keys(sizes) as Size[]).map((key) => (
-              <Option
-                key={key}
-                label={sizes[key].label}
-                preview={<span className="preview" style={{ fontSize: sizes[key].preview }} aria-hidden="true">Aa</span>}
-                selected={size === key}
-                onSelect={() => {
-                  setSize(key);
-                  setSheet(null);
-                }}
-              />
-            ))}
-          </div>
-        </Sheet>
-      )}
-      {sheet === "device" && (
-        <Sheet title="Mikrofon" onClose={() => setSheet(null)}>
-          <div className="options" role="radiogroup" aria-label="Mikrofon">
-            <Option label="Standardmikrofon" selected={device === ""} onSelect={() => { setDevice(""); setSheet(null); }} />
-            {devices.map((d) => (
-              <Option
-                key={d.deviceId}
-                label={d.label || "Mikrofon"}
-                selected={device === d.deviceId}
-                onSelect={() => {
-                  setDevice(d.deviceId);
-                  setSheet(null);
-                }}
-              />
-            ))}
-          </div>
-        </Sheet>
-      )}
-      {sheet === "audio" && (
-        <Sheet title="Audio prüfen" onClose={() => setSheet(null)}>
-          <dl className="diag">
-            <dt>Audio-Pakete</dt>
-            <dd>{audioInfo.chunks}</dd>
-            <dt>Pegel</dt>
-            <dd>{audioInfo.peak} %</dd>
-            <dt>Wiedergabe</dt>
-            <dd>{audioInfo.state}</dd>
-            <dt>Ton</dt>
-            <dd>{muted ? "aus" : "an"}</dd>
-          </dl>
-          <div className="tone">
-            <button className="btn btn-secondary" onClick={testTone}>
-              <Volume2 size={18} />
-              <span>Testton</span>
-            </button>
-            <span>{toneResult}</span>
-          </div>
-          <small>Ton kommt über die aktuell gewählten Lautsprecher oder Kopfhörer.</small>
-        </Sheet>
-      )}
-      {sheet === "share" && (
-        <Sheet title="Zuhörer einladen" onClose={() => setSheet(null)}>
-          <p>QR-Code scannen oder Link öffnen, dann auf „Zuhören starten“ tippen.</p>
-          <div className="qr">
-            {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
-            <div>
-              <QRCodeSVG value={link} size={168} level="M" bgColor="#ffffff" fgColor="#111111" />
-            </div>
-          </div>
-          <div className="link-row">
-            <input readOnly aria-label="Zuhörerlink" value={link} onFocus={(e) => e.target.select()} />
-            <button className="btn btn-secondary btn-icon" onClick={copy} aria-label={copied ? "Link kopiert" : "Link kopieren"}>
-              {copied ? <Check size={18} /> : <Link size={18} />}
-            </button>
-          </div>
-          <button className="btn btn-primary" onClick={canShare ? shareLink : copy}>
-            {canShare ? <Share size={18} /> : copied ? <Check size={18} /> : <Link size={18} />}
-            <span>{canShare ? "Link teilen" : copied ? "Link kopiert" : "Link kopieren"}</span>
-          </button>
-          <small>Im selben Netzwerk. Auf dem iPhone zuerst das lokale Zertifikat installieren und ihm vertrauen.</small>
-        </Sheet>
-      )}
+      {sheets}
     </div>
   );
 }

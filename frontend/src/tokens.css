@@ -55,7 +55,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --paper: oklch(11% 0 0);
     --paper-2: oklch(16% 0 0);
     --paper-3: oklch(22% 0 0);
@@ -72,3 +72,24 @@
     --shadow-raised: 0 1px 2px oklch(0% 0 0 / 0.5);
   }
 }
+/* Vom Nutzer gewählte Darstellung überstimmt das System */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+    --paper: oklch(11% 0 0);
+    --paper-2: oklch(16% 0 0);
+    --paper-3: oklch(22% 0 0);
+    --ink: oklch(96% 0 0);
+    --ink-hover: oklch(86% 0 0);
+    --ink-2: oklch(72% 0 0);
+    --ink-3: oklch(55% 0 0);
+    --on-ink: oklch(11% 0 0);
+    --line: oklch(100% 0 0 / 0.12);
+    --line-strong: oklch(100% 0 0 / 0.34);
+    --scrim: oklch(0% 0 0 / 0.62);
+    --shadow-dock: 0 -6px 24px -12px oklch(0% 0 0 / 0.6);
+    --shadow-sheet: 0 -12px 48px -12px oklch(0% 0 0 / 0.8);
+    --shadow-raised: 0 1px 2px oklch(0% 0 0 / 0.5);
+  }
