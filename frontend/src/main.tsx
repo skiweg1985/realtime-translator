@@ -543,7 +543,8 @@ function App() {
     setStatus(next);
   }
   function goHome() {
-    location.href = "/";
+    /* Synchron auf "/" wechseln, dann laden: ein direktes location.href plus reload bricht die Navigation ab. */
+    history.replaceState(null, "", "/");
     location.reload();
   }
   /* Beenden für alle: Zuhörer bekommen den Endzustand, der Raum verschwindet, zurück zur Startseite. */
