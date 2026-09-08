@@ -5,6 +5,8 @@ import json
 
 import websockets
 
+from channels import upstream_message
+
 
 class Transcript:
     def __init__(self, previous=''):
@@ -30,7 +32,7 @@ class Transcript:
         return ' '.join([self.previous] + list(self.items.values())).strip()[-20000:]
 
 
-async def stream_captions(queue, url, key, model, source, previous, publish):
+async def stream_captions(queue, url, key, model, source, previous, publish, noise_reduction=None):
     """Consume PCM frames and a final None marker; never hide a broken stream."""
     transcript = Transcript(previous)
     pending = 0
@@ -38,17 +40,20 @@ async def stream_captions(queue, url, key, model, source, previous, publish):
     drained.set()
     async with websockets.connect(url, additional_headers={'Authorization': 'Bearer ' + key},
                                   proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as ws:
+        audio_input = {
+            'format': {'type': 'audio/pcm', 'rate': 24000},
+            'transcription': {'model': model, 'languages': [source]},
+            'turn_detection': None,
+        }
+        if noise_reduction:
+            audio_input['noise_reduction'] = {'type': noise_reduction}
         await ws.send(json.dumps({'type': 'session.update', 'session': {
-            'type': 'transcription', 'audio': {'input': {
-                'format': {'type': 'audio/pcm', 'rate': 24000},
-                'transcription': {'model': model, 'languages': [source]},
-                'turn_detection': None,
-            }}}}))
+            'type': 'transcription', 'audio': {'input': audio_input}}}))
         async with asyncio.timeout(20):
             while True:
                 event = json.loads(await ws.recv())
                 if event.get('type') == 'error':
-                    raise RuntimeError('Caption session rejected')
+                    raise RuntimeError('Caption session rejected: ' + upstream_message(event))
                 if event.get('type') == 'session.updated':
                     break
 

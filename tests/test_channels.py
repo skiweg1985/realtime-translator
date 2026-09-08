@@ -12,7 +12,7 @@ class Socket:
 
 class FakeChannel:
     instances = []
-    def __init__(self, language, url, key, publish):
+    def __init__(self, language, url, key, publish, noise_reduction=None):
         self.language = language
         self.publish = publish
         self.status = 'live'
@@ -101,6 +101,43 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         await self.room.channels['en'].publish({'type':'translation_delta','delta':'Hello'})
         await self.room.channels['fr'].publish({'type':'translation_delta','delta':'Bonjour'})
         self.assertEqual(self.room.translations,{'en':'Hello','fr':'Bonjour'})
+
+class SessionUpdate(unittest.IsolatedAsyncioTestCase):
+    async def open_channel(self, reply, **kwargs):
+        import json
+        from channels import TranslationChannel
+        sent = []
+        published = []
+        class Socket:
+            async def send(self, raw):sent.append(json.loads(raw))
+            async def recv(self):return json.dumps(reply)
+            def __aiter__(self):return self
+            async def __anext__(self):raise StopAsyncIteration
+        class Connection:
+            async def __aenter__(self):return Socket()
+            async def __aexit__(self, *args):pass
+        async def publish(event):published.append(event)
+        with patch('channels.websockets.connect', return_value=Connection()):
+            channel = TranslationChannel('fr', 'wss://test', 'test', publish, **kwargs)
+            channel.start()
+            await asyncio.wait_for(channel.task, 2)
+        self.assertEqual(sent[0]['type'], 'session.update')
+        return sent[0]['session'], published
+
+    async def test_noise_reduction_is_sent_only_when_configured(self):
+        session, _ = await self.open_channel({'type': 'session.updated'})
+        self.assertEqual(session, {'audio': {'output': {'language': 'fr'}}})
+        session, _ = await self.open_channel({'type': 'session.updated'}, noise_reduction='far_field')
+        self.assertEqual(session['audio'], {'input': {'noise_reduction': {'type': 'far_field'}}, 'output': {'language': 'fr'}})
+
+    async def test_rejected_session_logs_upstream_detail_but_tells_listeners_nothing_private(self):
+        rejection = {'type': 'error', 'error': {'type': 'translation_error', 'message': 'Additional input models are not allowed.'}}
+        with self.assertLogs('channels', level='WARNING') as logs:
+            _, published = await self.open_channel(rejection, noise_reduction='near_field')
+        self.assertIn('Additional input models', logs.output[0])
+        self.assertEqual([e['type'] for e in published], ['status', 'error'])
+        self.assertNotIn('Additional', str(published))
+
 
 class Backpressure(unittest.IsolatedAsyncioTestCase):
     async def test_slow_language_does_not_cancel_another_channel(self):

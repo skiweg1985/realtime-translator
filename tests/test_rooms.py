@@ -41,6 +41,21 @@ class Rooms(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             main.room_by_code('0000')
         self.assertEqual(raised.exception.status_code, 404)
+    def test_noise_reduction_setting_normalises_and_rejects_typos(self):
+        with patch.dict('os.environ', {'NR_TEST': ''}):
+            self.assertEqual(main.noise_reduction_setting('NR_TEST', 'near_field'), 'near_field')
+        with patch.dict('os.environ', {'NR_TEST': ' Off '}):
+            self.assertIsNone(main.noise_reduction_setting('NR_TEST', 'near_field'))
+        with patch.dict('os.environ', {'NR_TEST': 'far_field'}):
+            self.assertEqual(main.noise_reduction_setting('NR_TEST', 'off'), 'far_field')
+        with patch.dict('os.environ', {'NR_TEST': 'loud'}), self.assertRaises(ValueError):
+            main.noise_reduction_setting('NR_TEST', 'off')
+    def test_frontend_offers_exactly_the_backend_languages(self):
+        import re
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / 'frontend/src/main.tsx').read_text()
+        block = re.search(r'const languages: Record<string, string> = \{(.*?)\};', source, re.S).group(1)
+        self.assertEqual(set(re.findall(r'^\s*([a-z]{2}):', block, re.M)), main.LANGUAGES)
     def test_missing_key_is_not_a_fake_success(self):
         with patch.object(main,'KEY',''), self.assertRaises(HTTPException) as raised:
             main.create_room(main.NewRoom(),request())
