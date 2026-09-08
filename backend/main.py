@@ -44,6 +44,7 @@ class Room:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     draining: bool = False
     original: str = ''
+    code: str = ''
 
 rooms: dict[str, Room] = {}
 
@@ -73,15 +74,32 @@ def create_room(body: NewRoom, request: Request):
         raise HTTPException(503, 'Der Übersetzungszugang ist noch nicht eingerichtet.')
     room_id = secrets.token_urlsafe(18)
     owner = secrets.token_urlsafe(24)
-    rooms[room_id] = Room(owner=owner, language=body.language, source=body.source)
-    return {'id': room_id, 'owner': owner}
+    code = new_code()
+    rooms[room_id] = Room(owner=owner, language=body.language, source=body.source, code=code)
+    return {'id': room_id, 'owner': owner, 'code': code}
+
+def new_code():
+    """Four spoken digits, unique among current rooms, never starting with zero."""
+    used = {room.code for room in rooms.values()}
+    for _ in range(50):
+        code = str(secrets.randbelow(9000) + 1000)
+        if code not in used:
+            return code
+    raise HTTPException(429, 'Zu viele Sitzungen. Bitte später erneut versuchen.')
+
+@app.get('/api/rooms/by-code/{code}')
+def room_by_code(code: str):
+    for room_id, room in rooms.items():
+        if room.code == code.strip():
+            return {'id': room_id}
+    raise HTTPException(404, 'Keine Sitzung mit diesem Code.')
 
 @app.get('/api/rooms/{room_id}')
 def room_info(room_id: str):
     room = rooms.get(room_id)
     if not room:
         raise HTTPException(404, 'Diese Sitzung ist nicht mehr verfügbar.')
-    return {'language': room.language, 'source': room.source, 'active': room.active,
+    return {'language': room.language, 'source': room.source, 'active': room.active, 'code': room.code,
             'languages': sorted(LANGUAGES), 'max_languages': MAX_LANGUAGES}
 
 async def broadcast(room, event, language=None):

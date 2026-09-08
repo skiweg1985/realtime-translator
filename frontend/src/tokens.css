@@ -1,4 +1,4 @@
-/* Design-Tokens: monochrom, Liquid Glass, Inter Variable. Light zuerst, Dark über prefers-color-scheme. */
+/* Design-Tokens: monochrom, flache Flächen, Inter Variable. Light zuerst, Dark über prefers-color-scheme. */
 :root {
   color-scheme: light dark;
 
@@ -6,13 +6,15 @@
     "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui,
     "Segoe UI", Roboto, sans-serif;
 
+  /* Lesegröße der Untertitel, vom Zuhörer wählbar */
+  --scale: 1;
+
   --text-xs: 12px;
   --text-sm: 13px;
   --text-base: 15px;
   --text-md: 17px;
-  --text-lg: 21px;
+  --text-lg: 20px;
   --text-input: 16px;
-  --text-display: clamp(34px, 9vw, 56px);
 
   --space-1: 4px;
   --space-2: 8px;
@@ -24,92 +26,70 @@
   --space-8: 48px;
 
   --radius-sm: 10px;
-  --radius-md: 16px;
-  --radius-lg: 24px;
-  --radius-xl: 32px;
-  --radius-pill: 999px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
 
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --dur-fast: 150ms;
-  --dur-base: 220ms;
-  --dur-slow: 340ms;
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
 
-  --glass-blur: 24px;
   --white: oklch(100% 0 0);
 
   /* Light */
-  --paper: oklch(97.5% 0 0);
-  --paper-2: oklch(93.5% 0 0);
-  --ink: oklch(16% 0 0);
+  --paper: oklch(98% 0 0);
+  --paper-2: oklch(94% 0 0);
+  --paper-3: oklch(89% 0 0);
+  --ink: oklch(15% 0 0);
   --ink-hover: oklch(28% 0 0);
-  --ink-2: oklch(45% 0 0);
+  --ink-2: oklch(44% 0 0);
   --ink-3: oklch(57% 0 0);
   --on-ink: oklch(98% 0 0);
-  --line: oklch(16% 0 0 / 0.09);
-  --scrim: oklch(16% 0 0 / 0.32);
-
-  --glass-bg: oklch(100% 0 0 / 0.55);
-  --glass-bg-strong: oklch(100% 0 0 / 0.82);
-  --glass-hover: oklch(100% 0 0 / 0.92);
-  --glass-border: oklch(16% 0 0 / 0.08);
-  --glass-highlight: oklch(100% 0 0 / 0.75);
-  --glass-shadow:
-    0 1px 2px oklch(16% 0 0 / 0.05),
-    0 18px 40px -16px oklch(16% 0 0 / 0.16);
-  --primary-shadow:
-    inset 0 1px 0 oklch(100% 0 0 / 0.14),
-    0 1px 2px oklch(0% 0 0 / 0.18);
-
-  --glow-1: oklch(100% 0 0 / 0.9);
-  --glow-2: oklch(88% 0 0 / 0.7);
-  --glow-3: oklch(91% 0 0 / 0.8);
-
-  --orb-hi: oklch(100% 0 0);
-  --orb-mid: oklch(94% 0 0);
-  --orb-lo: oklch(82% 0 0);
-  --orb-shade: oklch(16% 0 0 / 0.14);
-  --orb-shadow: oklch(16% 0 0 / 0.28);
-  --orb-glow: oklch(16% 0 0 / 0.08);
-  --orb-sheen: oklch(100% 0 0 / 0.55);
-  --wave: oklch(16% 0 0 / 0.7);
+  --line: oklch(15% 0 0 / 0.1);
+  --line-strong: oklch(15% 0 0 / 0.3);
+  --scrim: oklch(15% 0 0 / 0.4);
+  --shadow-dock: 0 -6px 24px -12px oklch(15% 0 0 / 0.2);
+  --shadow-sheet: 0 -12px 48px -12px oklch(15% 0 0 / 0.32);
+  --shadow-raised: 0 1px 2px oklch(15% 0 0 / 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --paper: oklch(12% 0 0);
-    --paper-2: oklch(19% 0 0);
+  :root:not([data-theme="light"]) {
+    --paper: oklch(11% 0 0);
+    --paper-2: oklch(16% 0 0);
+    --paper-3: oklch(22% 0 0);
     --ink: oklch(96% 0 0);
-    --ink-hover: oklch(88% 0 0);
+    --ink-hover: oklch(86% 0 0);
     --ink-2: oklch(72% 0 0);
-    --ink-3: oklch(54% 0 0);
-    --on-ink: oklch(12% 0 0);
-    --line: oklch(100% 0 0 / 0.1);
-    --scrim: oklch(0% 0 0 / 0.6);
-
-    --glass-bg: oklch(100% 0 0 / 0.06);
-    --glass-bg-strong: oklch(24% 0 0 / 0.82);
-    --glass-hover: oklch(100% 0 0 / 0.12);
-    --glass-border: oklch(100% 0 0 / 0.1);
-    --glass-highlight: oklch(100% 0 0 / 0.12);
-    --glass-shadow:
-      0 1px 2px oklch(0% 0 0 / 0.4),
-      0 18px 40px -16px oklch(0% 0 0 / 0.6);
-    --primary-shadow:
-      inset 0 1px 0 oklch(100% 0 0 / 0.5),
-      0 1px 2px oklch(0% 0 0 / 0.4);
-
-    --glow-1: oklch(24% 0 0 / 0.9);
-    --glow-2: oklch(19% 0 0 / 0.9);
-    --glow-3: oklch(21% 0 0 / 0.9);
-
-    --orb-hi: oklch(42% 0 0);
-    --orb-mid: oklch(25% 0 0);
-    --orb-lo: oklch(13% 0 0);
-    --orb-shade: oklch(0% 0 0 / 0.55);
-    --orb-shadow: oklch(0% 0 0 / 0.8);
-    --orb-glow: oklch(100% 0 0 / 0.07);
-    --orb-sheen: oklch(100% 0 0 / 0.18);
-    --wave: oklch(100% 0 0 / 0.75);
+    --ink-3: oklch(55% 0 0);
+    --on-ink: oklch(11% 0 0);
+    --line: oklch(100% 0 0 / 0.12);
+    --line-strong: oklch(100% 0 0 / 0.34);
+    --scrim: oklch(0% 0 0 / 0.62);
+    --shadow-dock: 0 -6px 24px -12px oklch(0% 0 0 / 0.6);
+    --shadow-sheet: 0 -12px 48px -12px oklch(0% 0 0 / 0.8);
+    --shadow-raised: 0 1px 2px oklch(0% 0 0 / 0.5);
   }
 }
+/* Vom Nutzer gewählte Darstellung überstimmt das System */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+    --paper: oklch(11% 0 0);
+    --paper-2: oklch(16% 0 0);
+    --paper-3: oklch(22% 0 0);
+    --ink: oklch(96% 0 0);
+    --ink-hover: oklch(86% 0 0);
+    --ink-2: oklch(72% 0 0);
+    --ink-3: oklch(55% 0 0);
+    --on-ink: oklch(11% 0 0);
+    --line: oklch(100% 0 0 / 0.12);
+    --line-strong: oklch(100% 0 0 / 0.34);
+    --scrim: oklch(0% 0 0 / 0.62);
+    --shadow-dock: 0 -6px 24px -12px oklch(0% 0 0 / 0.6);
+    --shadow-sheet: 0 -12px 48px -12px oklch(0% 0 0 / 0.8);
+    --shadow-raised: 0 1px 2px oklch(0% 0 0 / 0.5);
+  }

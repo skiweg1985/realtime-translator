@@ -30,6 +30,17 @@ class Rooms(unittest.TestCase):
     def test_unknown_language_rejected(self):
         with self.assertRaises(HTTPException):
             main.create_room(main.NewRoom(language='untrusted'), request())
+    def test_join_code_is_four_spoken_digits_and_resolves(self):
+        a = main.create_room(main.NewRoom(), request())
+        b = main.create_room(main.NewRoom(), request())
+        self.assertRegex(a['code'], r'^[1-9][0-9]{3}$')
+        self.assertNotEqual(a['code'], b['code'])
+        self.assertEqual(main.room_by_code(a['code'])['id'], a['id'])
+        self.assertEqual(main.room_info(a['id'])['code'], a['code'])
+    def test_unknown_join_code_rejected(self):
+        with self.assertRaises(HTTPException) as raised:
+            main.room_by_code('0000')
+        self.assertEqual(raised.exception.status_code, 404)
     def test_missing_key_is_not_a_fake_success(self):
         with patch.object(main,'KEY',''), self.assertRaises(HTTPException) as raised:
             main.create_room(main.NewRoom(),request())
