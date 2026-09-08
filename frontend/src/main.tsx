@@ -41,9 +41,13 @@ const languages: Record<string, string> = {
   nl: "Nederlands",
   pl: "Polski",
   uk: "Українська",
-  tr: "Türkçe",
+  ru: "Русский",
   ar: "العربية",
+  hi: "हिन्दी",
+  id: "Bahasa Indonesia",
+  vi: "Tiếng Việt",
   ja: "日本語",
+  ko: "한국어",
   zh: "中文",
 };
 const languageOptions = Object.entries(languages) as [string, string][];

@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -15,14 +16,30 @@ from pydantic import BaseModel
 from transcription import stream_captions
 from channels import TranslationChannel
 
+log = logging.getLogger(__name__)
+
 MAX_LANGUAGES = 4
 
-LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'tr', 'ar', 'ja', 'zh'}
+# Keep identical to `languages` in frontend/src/main.tsx (tests/test_rooms.py checks this).
+LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'ru', 'ar', 'hi', 'id', 'vi', 'ja', 'ko', 'zh'}
 URL = os.getenv('TRANSLATE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime/translations?model=azure-live-translate')
 KEY = os.getenv('TRANSLATE_KEY', '')
 TRANSCRIBE_URL = os.getenv('TRANSCRIBE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime?model=azure-live-transcribe&intent=transcription')
 TRANSCRIBE_MODEL = os.getenv('TRANSCRIBE_MODEL', 'azure-live-transcribe')
 TRANSCRIBE_KEY = os.getenv('TRANSCRIBE_KEY', '')
+
+NOISE_REDUCTION_MODES = ('off', 'near_field', 'far_field')
+
+def noise_reduction_setting(name, default):
+    """near_field: phone held close (our main case). far_field: room microphone. off: field omitted."""
+    value = os.getenv(name, '').strip().lower() or default
+    if value not in NOISE_REDUCTION_MODES:
+        raise ValueError(f'{name} must be one of {", ".join(NOISE_REDUCTION_MODES)}, not {value!r}')
+    return None if value == 'off' else value
+
+# The LiteLLM translation route rejects any audio.input field, so translation defaults to off.
+TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'off')
+TRANSCRIBE_NOISE_REDUCTION = noise_reduction_setting('TRANSCRIBE_NOISE_REDUCTION', 'near_field')
 
 @dataclass(eq=False)
 class Peer:
@@ -52,7 +69,8 @@ app = FastAPI()
 
 @app.get('/api/health')
 def health():
-    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIBE_KEY else 'unavailable'}
+    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIBE_KEY else 'unavailable',
+            'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off', 'transcription': TRANSCRIBE_NOISE_REDUCTION or 'off'}}
 
 class NewRoom(BaseModel):
     language: str = 'en'
@@ -128,8 +146,9 @@ async def transcribe_audio(room, queue):
         await broadcast(room, {'type': 'original', 'text': text})
     try:
         await stream_captions(queue, TRANSCRIBE_URL, TRANSCRIBE_KEY, TRANSCRIBE_MODEL,
-                              room.source, room.original, publish)
-    except Exception:
+                              room.source, room.original, publish, TRANSCRIBE_NOISE_REDUCTION)
+    except Exception as exc:
+        log.warning('Captions failed: %s', exc)
         await broadcast(room, {'type': 'notice', 'message': 'Cloud-Spracherkennung ist momentan nicht verfügbar. Die Übersetzung läuft weiter.'})
 
 def channel_status(room, language):
@@ -145,7 +164,7 @@ def ensure_channel(room, language):
             room.translations[language] = (room.translations.get(language, '') + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
-    channel = TranslationChannel(language, URL, KEY, publish)
+    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=TRANSLATE_NOISE_REDUCTION)
     room.channels[language] = channel
     channel.start()
 

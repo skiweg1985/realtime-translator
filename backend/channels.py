@@ -2,16 +2,27 @@
 import asyncio
 import base64
 import json
+import logging
 
 import websockets
 
+log = logging.getLogger(__name__)
+
+
+def upstream_message(event):
+    error = event.get('error') or {}
+    return str(error.get('message') or error.get('type') or 'unknown error')[:200]
+
 
 class TranslationChannel:
-    def __init__(self, language, url, key, publish):
+    def __init__(self, language, url, key, publish, noise_reduction=None):
         self.language = language
         self.url = url
         self.key = key
         self.publish = publish
+        # 'near_field' or 'far_field'; None omits audio.input entirely, which the
+        # LiteLLM translation route currently requires (see README).
+        self.noise_reduction = noise_reduction
         self.queue = asyncio.Queue(maxsize=100)
         self.status = 'connecting'
         self.task = None
@@ -40,13 +51,15 @@ class TranslationChannel:
         try:
             async with websockets.connect(self.url, additional_headers={'Authorization': 'Bearer ' + self.key},
                                           proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as ws:
-                await ws.send(json.dumps({'type': 'session.update', 'session': {
-                    'audio': {'output': {'language': self.language}}}}))
+                session = {'audio': {'output': {'language': self.language}}}
+                if self.noise_reduction:
+                    session['audio']['input'] = {'noise_reduction': {'type': self.noise_reduction}}
+                await ws.send(json.dumps({'type': 'session.update', 'session': session}))
                 async with asyncio.timeout(20):
                     while True:
                         event = json.loads(await ws.recv())
                         if event.get('type') == 'error':
-                            raise RuntimeError('Translation session rejected')
+                            raise RuntimeError('Translation session rejected: ' + upstream_message(event))
                         if event.get('type') == 'session.updated':
                             break
                 self.status = 'live'
@@ -61,7 +74,7 @@ class TranslationChannel:
                         elif kind == 'session.output_transcript.delta':
                             await self.publish({'type': 'translation_delta', 'delta': event['delta']})
                         elif kind == 'error':
-                            raise RuntimeError('Translation stream failed')
+                            raise RuntimeError('Translation stream failed: ' + upstream_message(event))
                     raise RuntimeError('Translation stream closed')
 
                 async def send():
@@ -89,7 +102,8 @@ class TranslationChannel:
                     await asyncio.gather(sender, receiver, return_exceptions=True)
                 self.status = 'ended'
                 await self.publish({'type': 'status', 'status': 'ended'})
-        except Exception:
+        except Exception as exc:
+            log.warning('Translation channel %s failed: %s', self.language, exc)
             self.status = 'error'
             await self.publish({'type': 'status', 'status': 'error'})
             await self.publish({'type': 'error', 'message': 'Diese Übersetzung ist momentan nicht verfügbar. Bitte erneut verbinden oder eine andere Sprache wählen.'})

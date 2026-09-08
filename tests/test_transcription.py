@@ -36,6 +36,27 @@ class Captions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(text), 20000)
 
 class Streaming(unittest.IsolatedAsyncioTestCase):
+    async def test_noise_reduction_is_sent_only_when_configured(self):
+        import json
+        from transcription import stream_captions
+        for setting, expected in ((None, None), ('near_field', {'type': 'near_field'})):
+            sent = []
+            class Socket:
+                async def send(self, raw):sent.append(json.loads(raw))
+                async def recv(self):return json.dumps({'type': 'session.updated'})
+                def __aiter__(self):return self
+                async def __anext__(self):await asyncio.Event().wait()
+            class Connection:
+                async def __aenter__(self):return Socket()
+                async def __aexit__(self, *args):pass
+            q = asyncio.Queue()
+            await q.put(None)
+            with patch('transcription.websockets.connect', return_value=Connection()):
+                await asyncio.wait_for(stream_captions(q, 'wss://test', 'test', 'alias', 'de', '', None, setting), 1)
+            audio_input = sent[0]['session']['audio']['input']
+            self.assertEqual(audio_input.get('noise_reduction'), expected)
+            self.assertEqual(audio_input['transcription'], {'model': 'alias', 'languages': ['de']})
+
     async def test_stop_waits_for_final_caption_and_commits_short_tail(self):
         import json
         from transcription import stream_captions
