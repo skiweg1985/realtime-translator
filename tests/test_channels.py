@@ -15,6 +15,7 @@ class FakeChannel:
     def __init__(self, language, url, key, publish, noise_reduction=None):
         self.language = language
         self.publish = publish
+        self.noise_reduction = noise_reduction
         self.status = 'live'
         self.task = None
         self.closed = False
@@ -85,6 +86,19 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         self.room.peers.remove(a)
         await main.prune_channels(self.room)
         self.assertFalse(self.room.channels)
+
+    async def test_speaker_choice_reaches_every_channel(self):
+        self.room.noise_reduction = 'far_field'
+        await self.join('en');await self.join('fr')
+        self.assertEqual([c.noise_reduction for c in FakeChannel.instances], ['far_field', 'far_field'])
+        self.assertIsNone(main.chosen_noise_reduction('loud'))
+        self.assertIsNone(main.chosen_noise_reduction(None))
+        self.assertEqual(main.chosen_noise_reduction('near_field'), 'near_field')
+        self.room.noise_reduction = 'off'
+        self.assertIsNone(main.room_noise_reduction(self.room))
+        self.room.noise_reduction = None
+        with patch.object(main, 'TRANSLATE_NOISE_REDUCTION', 'near_field'):
+            self.assertEqual(main.room_noise_reduction(self.room), 'near_field')
 
     async def test_waiting_room_does_not_open_upstreams(self):
         self.room.active = False

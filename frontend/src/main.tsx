@@ -462,6 +462,12 @@ function App() {
   const [transcription, setTranscription] = useState("loading");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [device, setDevice] = useState("");
+  /* Rauschunterdrückung der Übersetzung: Wahl des Sprechers, sonst der Serverstandard aus /api/health. */
+  const [noise, setNoise] = useState(() => {
+    const saved = stored("translate:noise");
+    return saved === "off" || saved === "near_field" || saved === "far_field" ? saved : "";
+  });
+  const [noiseDefault, setNoiseDefault] = useState("off");
   const [mode, setMode] = useState<Mode>("both");
   const [size, setSize] = useState<Size>(() => {
     const saved = stored("translate:size");
@@ -494,7 +500,10 @@ function App() {
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
-      .then((x) => setTranscription(x.transcription));
+      .then((x) => {
+        setTranscription(x.transcription);
+        if (x.noise_reduction?.translation) setNoiseDefault(x.noise_reduction.translation);
+      });
     if (room)
       fetch("/api/rooms/" + room)
         .then(async (r) => {
@@ -538,6 +547,9 @@ function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [focus, sheet]);
   useEffect(() => store("translate:size", size), [size]);
+  useEffect(() => {
+    if (noise) store("translate:noise", noise);
+  }, [noise]);
   useEffect(() => {
     store("translate:ui", ui);
     document.documentElement.lang = ui;
@@ -752,7 +764,7 @@ function App() {
           JSON.stringify(
             listener
               ? { role: "listener", language: selectedLanguage.current, subscription: subscription.current }
-              : { role: "speaker", owner: secret },
+              : { role: "speaker", owner: secret, noise_reduction: noise || noiseDefault },
           ),
         );
       ws.onmessage = (message) => {
@@ -1217,17 +1229,34 @@ function App() {
       )}
       {sheet === "device" && (
         <Sheet title={t("micUnnamed")} closeLabel={t("close")} onClose={() => setSheet(null)}>
-          <div className="options" role="radiogroup" aria-label={t("micUnnamed")}>
-            <Option label={t("micDefault")} selected={device === ""} onSelect={() => { setDevice(""); setSheet(null); }} />
-            {devices.map((d) => (
+          {devices.length > 1 && (
+            <div className="options" role="radiogroup" aria-label={t("micUnnamed")}>
+              <Option label={t("micDefault")} selected={device === ""} onSelect={() => setDevice("")} />
+              {devices.map((d) => (
+                <Option
+                  key={d.deviceId}
+                  label={d.label || t("micUnnamed")}
+                  selected={device === d.deviceId}
+                  onSelect={() => setDevice(d.deviceId)}
+                />
+              ))}
+            </div>
+          )}
+          <p className="field-label">{t("noiseTitle")}</p>
+          <div className="options" role="radiogroup" aria-label={t("noiseTitle")}>
+            {(
+              [
+                ["off", "noiseOff", null],
+                ["near_field", "noiseNear", "noiseNearDetail"],
+                ["far_field", "noiseFar", "noiseFarDetail"],
+              ] as [string, Key, Key | null][]
+            ).map(([value, label, detail]) => (
               <Option
-                key={d.deviceId}
-                label={d.label || t("micUnnamed")}
-                selected={device === d.deviceId}
-                onSelect={() => {
-                  setDevice(d.deviceId);
-                  setSheet(null);
-                }}
+                key={value}
+                label={t(label)}
+                detail={detail ? t(detail) : undefined}
+                selected={(noise || noiseDefault) === value}
+                onSelect={() => setNoise(value)}
               />
             ))}
           </div>
@@ -1385,12 +1414,10 @@ function App() {
                     {t("codeLabel")} <strong className="code">{code}</strong>
                   </span>
                 )}
-                {devices.length > 1 && (
-                  <button className="textbutton" onClick={() => setSheet("device")} disabled={active}>
-                    <Mic size={14} aria-hidden="true" />
-                    {deviceLabel}
-                  </button>
-                )}
+                <button className="textbutton" onClick={() => setSheet("device")} disabled={active}>
+                  <Mic size={14} aria-hidden="true" />
+                  {deviceLabel}
+                </button>
               </div>
               {/* Ohne Transkript trägt die Stimmlinie den Raum, mit Transkript rückt sie schmal darüber. */}
               {transcript ? (

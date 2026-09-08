@@ -41,6 +41,14 @@ def noise_reduction_setting(name, default):
 TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'off')
 TRANSCRIBE_NOISE_REDUCTION = noise_reduction_setting('TRANSCRIBE_NOISE_REDUCTION', 'near_field')
 
+def chosen_noise_reduction(value):
+    """The speaker's per-session choice; anything unknown means the configured default."""
+    return value if value in NOISE_REDUCTION_MODES else None
+
+def room_noise_reduction(room):
+    mode = room.noise_reduction or TRANSLATE_NOISE_REDUCTION or 'off'
+    return None if mode == 'off' else mode
+
 @dataclass(eq=False)
 class Peer:
     ws: WebSocket
@@ -62,6 +70,7 @@ class Room:
     draining: bool = False
     original: str = ''
     code: str = ''
+    noise_reduction: str | None = None
 
 rooms: dict[str, Room] = {}
 
@@ -186,7 +195,7 @@ def ensure_channel(room, language):
             room.translations[language] = (room.translations.get(language, '') + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
-    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=TRANSLATE_NOISE_REDUCTION)
+    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=room_noise_reduction(room))
     room.channels[language] = channel
     channel.start()
 
@@ -307,6 +316,7 @@ async def room_socket(ws: WebSocket, room_id: str):
             return
         if owner:
             room.active = True
+            room.noise_reduction = chosen_noise_reduction(auth.get('noise_reduction'))
         room.peers.add(peer)
         sending = asyncio.create_task(send_peer(peer))
         if owner:
