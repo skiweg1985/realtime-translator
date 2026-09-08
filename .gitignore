@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+certs/*
+!certs/.gitkeep
+frontend/node_modules/
+frontend/dist/
+frontend/public/local-ca.cer
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.playwright-cli/
+.DS_Store

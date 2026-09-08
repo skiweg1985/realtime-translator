@@ -1,0 +1,35 @@
+name: translate-live
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      HF_HOME: /models
+    volumes:
+      - models:/models
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          CMD,
+          python,
+          -c,
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+  https:
+    image: haproxy:3.2-alpine
+    ports:
+      - "8443:8443"
+      - "8080:8080"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./certs/server.pem:/certs/server.pem:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  models:
