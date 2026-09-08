@@ -38,8 +38,7 @@ def noise_reduction_setting(name, default):
         raise ValueError(f'{name} must be one of {", ".join(NOISE_REDUCTION_MODES)}, not {value!r}')
     return None if value == 'off' else value
 
-# The LiteLLM translation route rejects any audio.input field, so translation defaults to off.
-TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'off')
+TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'near_field')
 TRANSCRIBE_NOISE_REDUCTION = noise_reduction_setting('TRANSCRIBE_NOISE_REDUCTION', 'near_field')
 
 def chosen_noise_reduction(value):
@@ -221,21 +220,46 @@ async def swap_channels(room):
         for language, old in list(room.channels.items()):
             del room.channels[language]
             ensure_channel(room, language)
-            forward = old.publish
-            async def tail(event, forward=forward):
-                if event['type'] in ('audio', 'translation_delta'):
-                    await forward(event)
-            old.publish = tail
-            old.feed(None)
-            room.retiring.append(asyncio.create_task(retire(old)))
+            room.retiring.append(asyncio.create_task(Handover(old, room.channels[language]).run()))
 
 
-async def retire(channel):
-    try:
-        async with asyncio.timeout(12):
-            await asyncio.gather(channel.task, return_exceptions=True)
-    finally:
-        await channel.close()
+class Handover:
+    """Hold the new channel's output until the old channel has finished its last sentence."""
+    def __init__(self, old, new):
+        self.old = old
+        self.buffer = []
+        self.released = False
+        self.last_tail = asyncio.get_running_loop().time()
+        forward_old, self.forward_new = old.publish, new.publish
+        async def tail(event):
+            if event['type'] in ('audio', 'translation_delta'):
+                self.last_tail = asyncio.get_running_loop().time()
+                await forward_old(event)
+        async def gated(event):
+            if self.released or event['type'] not in ('audio', 'translation_delta'):
+                await self.forward_new(event)
+            else:
+                self.buffer.append(event)
+        old.publish, new.publish = tail, gated
+        old.feed(None)
+
+    async def run(self):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            # The tail needs a moment to appear; then one quiet second means the sentence is over.
+            while not self.old.task.done() and loop.time() - started < 10:
+                if loop.time() - started >= 2 and loop.time() - self.last_tail >= 1:
+                    break
+                await asyncio.sleep(.1)
+            while self.buffer:
+                await self.forward_new(self.buffer.pop(0))
+            self.released = True
+            async with asyncio.timeout(12):
+                await asyncio.gather(self.old.task, return_exceptions=True)
+        finally:
+            self.released = True
+            await self.old.close()
 
 
 async def prune_channels(room):
@@ -293,10 +317,10 @@ async def translation(room, ws, speaker):
                     if len(pcm) != 4800:
                         raise ValueError('Invalid audio frame')
                     if swap is not None:
-                        # Swap in a pause of half a second, or after three seconds at the latest.
+                        # Swap in a pause of half a second, or after five seconds at the latest.
                         swap += 1
                         quiet = quiet + 1 if is_quiet(pcm) else 0
-                        if quiet >= 5 or swap >= 30:
+                        if quiet >= 5 or swap >= 50:
                             swap = None
                             await swap_channels(room)
                     if not transcriber.done():
