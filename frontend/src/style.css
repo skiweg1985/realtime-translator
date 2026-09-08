@@ -176,10 +176,12 @@ main {
 .is-home .topbar {
   justify-content: flex-end;
 }
-/* Startseite: Produktname, Funktionsbezeichnung, zwei Aktionen. Alles in der unteren Hälfte. */
+/* Startseite: Produktname oben, die zwei Aktionen unten in der Daumenzone. */
 .identity {
+  padding-top: var(--space-2);
+}
+.is-home .choices {
   margin-top: auto;
-  padding-bottom: var(--space-6);
 }
 .identity-name {
   display: block;
