@@ -147,7 +147,8 @@ function VoiceLine({ values, className = "" }: { values: ArrayLike<number>; clas
   );
 }
 
-/* Pegelanzeige aus echten Audiodaten: die letzten Werte als Balken über einer Grundlinie. */
+/* Pegelanzeige aus echten Audiodaten als Stimmlinie: neue Werte kommen rechts an und wandern
+   in 4,8 Sekunden nach links. Im Leerlauf bleibt nur die Grundlinie. */
 function LevelMeter({
   levels,
   active,
@@ -163,6 +164,7 @@ function LevelMeter({
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
     let frame = 0;
+    const signed = new Float32Array(levels.current.length);
     const draw = () => {
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth,
@@ -173,21 +175,29 @@ function LevelMeter({
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = getComputedStyle(canvas).color;
-      const data = levels.current,
-        n = data.length,
-        gap = 3,
-        bw = Math.max(2, (w - gap * (n - 1)) / n);
-      ctx.globalAlpha = 0.22;
-      ctx.fillRect(0, Math.round(h / 2), w, 1);
-      if (!active) return;
-      for (let i = 0; i < n; i++) {
-        data[i] = Math.max(0, data[i] * 0.965);
-        const bh = Math.min(h, data[i] * h);
-        if (bh < 1.5) continue;
-        ctx.globalAlpha = 0.3 + 0.7 * ((i + 1) / n);
-        ctx.fillRect(i * (bw + gap), (h - bh) / 2, bw, bh);
+      const color = getComputedStyle(canvas).color;
+      ctx.lineWidth = 1;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = color;
+      if (!active) {
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(h / 2) + 0.5);
+        ctx.lineTo(w, Math.round(h / 2) + 0.5);
+        ctx.stroke();
+        return;
       }
+      const data = levels.current,
+        n = data.length;
+      for (let i = 0; i < n; i++) {
+        /* Nachbarn glätten die Hüllkurve, die Wurzel hebt leise Sprache an, eine Schwingung
+           mit Periode vier Samples macht daraus eine ruhige Linie statt einer Zackenreihe. */
+        const amp = (data[Math.max(0, i - 1)] + 2 * data[i] + data[Math.min(n - 1, i + 1)]) / 4;
+        signed[i] = Math.sqrt(Math.min(1, amp)) * 0.92 * Math.sin((i * Math.PI) / 2);
+      }
+      ctx.globalAlpha = 0.75;
+      ctx.stroke(new Path2D(voicePath(signed, w, h)));
       frame = requestAnimationFrame(draw);
     };
     draw();
