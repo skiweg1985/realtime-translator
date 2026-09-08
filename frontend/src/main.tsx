@@ -1,24 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   Mic,
   Headphones,
-  AudioLines,
-  Link,
+  Captions as CaptionsIcon,
+  BookOpen,
   Check,
   Square,
   Volume2,
   VolumeX,
   X,
   ChevronDown,
-  ChevronRight,
-  Radio,
-  ArrowRight,
-  Lock,
+  ChevronUp,
+  Link,
+  Share,
   Loader2,
   AlertCircle,
   Info,
-  Share,
+  ALargeSmall,
+  Maximize2,
+  LogOut,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import "@fontsource-variable/inter/opsz.css";
@@ -41,45 +43,33 @@ const languages: Record<string, string> = {
 };
 const languageOptions = Object.entries(languages) as [string, string][];
 type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining" | "error";
+type Mode = "both" | "audio" | "text";
+type Size = "normal" | "large" | "xl";
+type SheetKind = "language" | "share" | "textSize" | "device" | "audio" | null;
+const sizes: Record<Size, { label: string; short: string; scale: number; preview: number }> = {
+  normal: { label: "Normal", short: "Normal", scale: 1, preview: 17 },
+  large: { label: "Groß", short: "Groß", scale: 1.25, preview: 22 },
+  xl: { label: "Extra groß", short: "XL", scale: 1.6, preview: 28 },
+};
+const modes: { key: Mode; label: string; icon: React.ReactNode }[] = [
+  { key: "both", label: "Ton + Text", icon: <CaptionsIcon size={20} /> },
+  { key: "audio", label: "Ton", icon: <Headphones size={20} /> },
+  { key: "text", label: "Text", icon: <BookOpen size={20} /> },
+];
+const LEVELS = 48;
 
-/* Gestylter Chip mit unsichtbarem nativem select darüber: iOS zeigt seinen Picker. */
-function ChipSelect({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-  className = "",
-}: {
-  label: string;
-  value: string;
-  options: [string, string][];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-  className?: string;
-}) {
-  const current = options.find(([k]) => k === value)?.[1] ?? value;
-  return (
-    <label className={"chip " + (disabled ? "is-locked " : "") + className}>
-      <span className="chip-label">{label}</span>
-      <span className="chip-value">{current}</span>
-      <span className="chip-icon" aria-hidden="true">
-        {disabled ? <Lock size={13} /> : <ChevronDown size={16} />}
-      </span>
-      <select
-        aria-label={label}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map(([k, v]) => (
-          <option key={k} value={k}>
-            {v}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+/* Den laufenden Text in Verlauf und aktuellen Satz teilen. */
+function splitCaption(text: string) {
+  const t = text.trim();
+  if (!t) return { history: "", current: "" };
+  const boundary = /[.!?…。！？]["“”»)]*\s+/g;
+  let cut = 0;
+  for (let m = boundary.exec(t); m; m = boundary.exec(t)) cut = m.index + m[0].length;
+  if (cut === 0 && t.length > 220) {
+    const i = t.lastIndexOf(" ", t.length - 140);
+    if (i > 0) cut = i + 1;
+  }
+  return { history: t.slice(0, cut).trimEnd(), current: t.slice(cut) };
 }
 
 /* Browser-Fehler beim Mikrofonzugriff in verständliche Hinweise übersetzen. */
@@ -94,6 +84,184 @@ function describeError(e: unknown) {
   return e instanceof Error && e.message
     ? e.message
     : "Mikrofon konnte nicht gestartet werden.";
+}
+
+function reducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/* Pegelanzeige aus echten Audiodaten: die letzten Werte als Balken. */
+function LevelMeter({
+  levels,
+  active,
+  className = "",
+}: {
+  levels: React.MutableRefObject<Float32Array>;
+  active: boolean;
+  className?: string;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    let frame = 0;
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth,
+        h = canvas.clientHeight;
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = getComputedStyle(canvas).color;
+      const data = levels.current,
+        n = data.length,
+        gap = 3,
+        bw = Math.max(2, (w - gap * (n - 1)) / n);
+      // Ruhende Grundlinie; bei Ton wachsen die Balken daraus heraus.
+      ctx.globalAlpha = 0.22;
+      ctx.fillRect(0, Math.round(h / 2), w, 1);
+      if (!active) return;
+      for (let i = 0; i < n; i++) {
+        data[i] = Math.max(0, data[i] * 0.965);
+        const bh = Math.min(h, data[i] * h);
+        if (bh < 1.5) continue;
+        ctx.globalAlpha = 0.3 + 0.7 * ((i + 1) / n);
+        ctx.fillRect(i * (bw + gap), (h - bh) / 2, bw, bh);
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(frame);
+  }, [active, levels]);
+  return <canvas ref={ref} className={"meter " + className} aria-hidden="true" />;
+}
+
+/* Untertitel: Verlauf oben, aktueller Satz groß und unten verankert. */
+function Captions({
+  label,
+  lang,
+  text,
+  placeholder,
+  endRef,
+}: {
+  label: string;
+  lang: string;
+  text: string;
+  placeholder: string;
+  endRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const { history, current } = splitCaption(text);
+  return (
+    <section className="captions" aria-label={label}>
+      <div className="captions-label">
+        {label} <span>· {lang}</span>
+      </div>
+      <div className="caption">
+        {history && <p className="caption-history">{history}</p>}
+        <p className="caption-current" aria-live="polite">
+          {current || <span className="placeholder">{placeholder}</span>}
+        </p>
+        <div ref={endRef} />
+      </div>
+    </section>
+  );
+}
+
+/* Bottom Sheet auf dem Telefon, Dialog auf großen Screens. Escape, Tipp daneben und Wischen schließen. */
+function Sheet({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLElement>(null);
+  const [drag, setDrag] = useState(0);
+  const start = useRef<number | null>(null),
+    now = useRef(0);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  function onTouchStart(e: React.TouchEvent<HTMLElement>) {
+    if (ref.current && ref.current.scrollTop > 0) return;
+    start.current = e.touches[0].clientY;
+    now.current = 0;
+  }
+  function onTouchMove(e: React.TouchEvent<HTMLElement>) {
+    if (start.current === null) return;
+    const dy = Math.max(0, e.touches[0].clientY - start.current);
+    now.current = dy;
+    setDrag(dy);
+  }
+  function onTouchEnd() {
+    if (start.current === null) return;
+    start.current = null;
+    if (now.current > 80) onClose();
+    else setDrag(0);
+  }
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <section
+        ref={ref}
+        className={"sheet " + (drag > 0 ? "is-dragging" : "")}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        style={drag > 0 ? { transform: `translateY(${drag}px)` } : undefined}
+        onClick={(e) => e.stopPropagation()}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
+      >
+        <div className="grabber" aria-hidden="true" />
+        <div className="sheet-head">
+          <h2>{title}</h2>
+          <button className="close" onClick={onClose} aria-label="Schließen">
+            <X size={22} />
+          </button>
+        </div>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function Option({
+  label,
+  detail,
+  preview,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  detail?: string;
+  preview?: React.ReactNode;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button className="option" role="radio" aria-checked={selected} onClick={onSelect}>
+      <span className="option-main">
+        {preview}
+        <span>
+          {label}
+          {detail && <small>{detail}</small>}
+        </span>
+      </span>
+      {selected && <Check size={20} aria-hidden="true" />}
+    </button>
+  );
 }
 
 function App() {
@@ -113,7 +281,6 @@ function App() {
   const [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [count, setCount] = useState(0),
-    [share, setShare] = useState(false),
     [copied, setCopied] = useState(false);
   const [muted, setMuted] = useState(false),
     [elapsed, setElapsed] = useState(0);
@@ -122,20 +289,29 @@ function App() {
   const [transcription, setTranscription] = useState("loading");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [device, setDevice] = useState("");
-  const [drag, setDrag] = useState(0);
+  const [mode, setMode] = useState<Mode>("both");
+  const [size, setSize] = useState<Size>(() => {
+    try {
+      const saved = localStorage.getItem("translate:size");
+      return saved && saved in sizes ? (saved as Size) : "normal";
+    } catch {
+      return "normal";
+    }
+  });
+  const [focus, setFocus] = useState(false);
+  const [sheet, setSheet] = useState<SheetKind>(null);
+  const [langTab, setLangTab] = useState<"source" | "target">("target");
   const socket = useRef<WebSocket | null>(null),
     context = useRef<AudioContext | null>(null),
     stream = useRef<MediaStream | null>(null);
   const capture = useRef<AudioWorkletNode | null>(null),
     nextAudio = useRef(0),
     audioGain = useRef<GainNode | null>(null);
-  const orb = useRef<HTMLDivElement>(null),
+  const route = useRef<HTMLDivElement>(null),
+    levels = useRef(new Float32Array(LEVELS)),
     running = useRef(false),
     wake = useRef<any>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
-  const sheet = useRef<HTMLElement>(null),
-    dragStart = useRef<number | null>(null),
-    dragNow = useRef(0);
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
@@ -172,20 +348,20 @@ function App() {
   useEffect(() => {
     const box = transcriptEnd.current?.parentElement;
     if (box && (text || original)) box.scrollTop = box.scrollHeight;
-  }, [text, original]);
+  }, [text, original, mode, size, focus]);
   useEffect(() => {
-    if (!share) return;
+    if (!focus || sheet) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeShare();
+      if (e.key === "Escape") setFocus(false);
     };
     document.addEventListener("keydown", onKey);
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [share]);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [focus, sheet]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("translate:size", size);
+    } catch {}
+  }, [size]);
   useEffect(
     () => () => {
       socket.current?.close();
@@ -196,11 +372,20 @@ function App() {
   );
   const active = ["connecting", "live", "draining"].includes(status);
   const busy = status === "connecting" || status === "draining";
+  const joined = status !== "idle" && status !== "ended";
+  const session = status !== "idle";
   const link = location.origin + "/#room=" + room;
   const canShare =
     typeof navigator !== "undefined" && typeof navigator.share === "function";
   const clock =
     Math.floor(elapsed / 60) + ":" + String(elapsed % 60).padStart(2, "0");
+  const languagesLocked = !listener && !!room;
+  function pushLevel(value: number) {
+    const data = levels.current;
+    data.copyWithin(0, 1);
+    data[data.length - 1] = value;
+    route.current?.style.setProperty("--energy", String(value));
+  }
   function stopMic() {
     running.current = false;
     capture.current?.disconnect();
@@ -248,11 +433,7 @@ function App() {
     }
     node.start(nextAudio.current);
     nextAudio.current += buffer.duration;
-    if (orb.current)
-      orb.current.style.setProperty(
-        "--energy",
-        String(0.25 + Math.random() * 0.5),
-      );
+    pushLevel(Math.min(1, peak * 1.6));
   }
   function clearPlayback() {
     for (const node of audioNodes.current) {
@@ -396,10 +577,7 @@ function App() {
               const samples = new Int16Array(e.data);
               let energy = 0;
               for (const value of samples) energy += value * value;
-              orb.current?.style.setProperty(
-                "--energy",
-                String(Math.min(1, Math.sqrt(energy / samples.length) / 5000)),
-              );
+              pushLevel(Math.min(1, Math.sqrt(energy / samples.length) / 5000));
             };
           }
           if (event.status === "ended") stopMic();
@@ -451,33 +629,10 @@ function App() {
   }
   async function shareLink() {
     try {
-      await navigator.share({ title: "translate live", url: link });
+      await navigator.share({ title: "Translate Live", url: link });
     } catch {
       /* Abgebrochen oder nicht erlaubt: kein Fehler für den Nutzer. */
     }
-  }
-  function closeShare() {
-    setShare(false);
-    setDrag(0);
-    dragStart.current = null;
-    dragNow.current = 0;
-  }
-  function onTouchStart(e: React.TouchEvent<HTMLElement>) {
-    if (sheet.current && sheet.current.scrollTop > 0) return;
-    dragStart.current = e.touches[0].clientY;
-    dragNow.current = 0;
-  }
-  function onTouchMove(e: React.TouchEvent<HTMLElement>) {
-    if (dragStart.current === null) return;
-    const dy = Math.max(0, e.touches[0].clientY - dragStart.current);
-    dragNow.current = dy;
-    setDrag(dy);
-  }
-  function onTouchEnd() {
-    if (dragStart.current === null) return;
-    dragStart.current = null;
-    if (dragNow.current > 80) closeShare();
-    else setDrag(0);
   }
   async function testTone() {
     try {
@@ -493,20 +648,43 @@ function App() {
       setToneResult("Testton abgespielt · " + ctx.state);
     } catch { setToneResult("Safari hat den Testton blockiert."); }
   }
-  function toggleMute() {
-    setMuted(!muted);
-    if (audioGain.current) audioGain.current.gain.value = muted ? 1 : 0;
+  function setAudio(on: boolean) {
+    setMuted(!on);
+    if (audioGain.current) audioGain.current.gain.value = on ? 1 : 0;
+  }
+  /* Moduswechsel mit View Transition, wenn der Browser sie kann. */
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    const apply = () =>
+      flushSync(() => {
+        setMode(next);
+        setAudio(next !== "text");
+        if (next !== "text") setFocus(false);
+      });
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => void };
+    if (doc.startViewTransition && !reducedMotion()) doc.startViewTransition(apply);
+    else apply();
+  }
+  function openLanguages(tab: "source" | "target") {
+    setLangTab(tab);
+    setSheet("language");
+  }
+  function pickLanguage(code: string) {
+    if (listener) chooseLanguage(code);
+    else if (langTab === "source") setSource(code);
+    else setLanguage(code);
+    setSheet(null);
   }
   const statusLabel: Record<Status, string> = {
-    idle: listener ? "Bereit zum Zuhören" : "Bereit, wenn du es bist",
-    connecting: "Verbindung wird aufgebaut",
-    live: listener ? "Du bist live dabei" : "Deine Stimme verbindet",
-    waiting: "Warte auf den Sprecher",
-    ended: "Sitzung pausiert",
-    draining: "Letzte Worte werden übersetzt",
-    error: "Diese Sprache ist momentan nicht verfügbar",
+    idle: listener ? "Noch nicht verbunden" : "Bereit",
+    connecting: "Verbindet …",
+    live: listener ? "Live" : "Live, du wirst übersetzt",
+    waiting: "Wartet auf den Sprecher",
+    ended: "Pausiert",
+    draining: "Wird beendet …",
+    error: "Sprache gerade nicht verfügbar",
   };
-  const pillLabel: Record<Status, string> = {
+  const stateLabel: Record<Status, string> = {
     idle: "Bereit",
     connecting: "Verbindet",
     live: "Live",
@@ -515,324 +693,368 @@ function App() {
     draining: "Beendet",
     error: "Unterbrochen",
   };
-  return (
-    <div className="app">
-      <header className="topbar glass">
-        <div className="topbar-inner">
-          <a className="brand" href="/" aria-label="translate live, Startseite">
-            <span className="brand-icon">
-              <AudioLines size={18} />
-            </span>
-            <span className="brand-name">
-              translate<span>live</span>
-            </span>
-          </a>
-          <div className={"status-pill " + status} role="status">
-            <span className="status-dot" aria-hidden="true" />
-            <span>{pillLabel[status]}</span>
-            {status === "live" && <span className="timer">{clock}</span>}
-          </div>
+  const deviceLabel =
+    devices.find((d) => d.deviceId === device)?.label || "Standardmikrofon";
+  const showText = listener ? mode !== "audio" : true;
+  const showAudio = listener && mode !== "text";
+  const stateView = (
+    <div className={"state " + status} role="status">
+      <span className="state-dot" aria-hidden="true" />
+      <span>{stateLabel[status]}</span>
+      {status === "live" && <span className="timer">{clock}</span>}
+    </div>
+  );
+  const alerts = (
+    <>
+      {error && (
+        <div className="alert" role="alert">
+          <AlertCircle size={18} aria-hidden="true" />
+          <span>{error}</span>
+          <button className="dismiss" onClick={() => setError("")} aria-label="Meldung schließen">
+            <X size={18} />
+          </button>
         </div>
+      )}
+      {notice && (
+        <div className="notice">
+          <Info size={18} aria-hidden="true" />
+          <span>{notice}</span>
+          <button className="dismiss" onClick={() => setNotice("")} aria-label="Hinweis schließen">
+            <X size={18} />
+          </button>
+        </div>
+      )}
+    </>
+  );
+  const sourceLang = (
+    <>
+      <small>Gesprochen</small>
+      <span className="lang-value">
+        <span>{languages[source]}</span>
+        {!listener && !languagesLocked && <ChevronDown size={18} aria-hidden="true" />}
+      </span>
+    </>
+  );
+  const targetLang = (
+    <>
+      <small>{listener ? "Ich höre" : "Übersetzt"}</small>
+      <span className="lang-value">
+        <span>{languages[language]}</span>
+        {(listener || !languagesLocked) && <ChevronDown size={18} aria-hidden="true" />}
+      </span>
+    </>
+  );
+  return (
+    <div
+      className={[
+        "app",
+        listener ? "is-listener" : "is-speaker",
+        "mode-" + (listener ? mode : "both"),
+        session ? "is-session" : "is-idle",
+        focus ? "is-focus" : "",
+      ].join(" ")}
+      style={{ "--scale": sizes[size].scale } as React.CSSProperties}
+    >
+      <header className="topbar">
+        {focus ? (
+          <>
+            {stateView}
+            <span className="focus-lang">{languages[language]}</span>
+          </>
+        ) : (
+          <>
+            <a className="brand" href="/" aria-label="Translate Live, Startseite">
+              Translate<b>Live</b>
+            </a>
+            {stateView}
+          </>
+        )}
       </header>
       <main>
-        <section className="hero">
-          <h1>
-            {listener ? (
-              <>
-                Deine Sprache.
-                <br />
-                <span>Alle verbunden.</span>
-              </>
-            ) : (
-              <>
-                Deine Worte.
-                <br />
-                <span>Ohne Sprachgrenzen.</span>
-              </>
-            )}
-          </h1>
-          <p className="intro">
-            {listener
-              ? "Hör die Übersetzung live. Oder lies einfach mit."
-              : "Sprich ganz natürlich. Andere hören und lesen live mit."}
-          </p>
-        </section>
-        <div className="language-row glass">
-          <ChipSelect
-            label="Gesprochen"
-            value={source}
-            options={languageOptions}
-            disabled={!!room}
-            onChange={setSource}
-          />
-          <ArrowRight size={16} className="language-arrow" aria-hidden="true" />
-          <ChipSelect
-            label={listener ? "Ich höre" : "Standardsprache"}
-            value={language}
-            options={languageOptions}
-            disabled={!listener && !!room}
-            onChange={chooseLanguage}
-          />
-        </div>
-        <section className="stage" aria-label="Live-Audio">
-          <div
-            ref={orb}
-            className={"orb " + (status === "live" ? "is-live" : "")}
-          >
-            <div className="orb-inner" />
-            <div className="wave">
-              {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-                <i key={i} style={{ "--i": i } as React.CSSProperties} />
-              ))}
+        <div className="column">
+          {!focus && (
+            <div ref={route} className={"route " + status}>
+              {!listener && !languagesLocked ? (
+                <button className="lang lang-source" onClick={() => openLanguages("source")} aria-label={"Gesprochene Sprache: " + languages[source] + ", ändern"}>
+                  {sourceLang}
+                </button>
+              ) : (
+                <div className="lang lang-source">{sourceLang}</div>
+              )}
+              <span className="route-line" aria-hidden="true" />
+              {listener || !languagesLocked ? (
+                <button className="lang lang-target" onClick={() => openLanguages("target")} aria-label={(listener ? "Ich höre " : "Übersetzt nach ") + languages[language] + ", ändern"}>
+                  {targetLang}
+                </button>
+              ) : (
+                <div className="lang lang-target">{targetLang}</div>
+              )}
             </div>
-          </div>
-          <p className="status" role="status">
-            {statusLabel[status]}
-          </p>
-          <div className="controls glass">
-            {!active && status !== "waiting" ? (
-              <button className="primary" onClick={start}>
-                {listener ? <Headphones size={18} /> : <Mic size={18} />}
-                {listener
-                  ? "Live zuhören"
-                  : status === "ended"
-                    ? "Weiter sprechen"
-                    : "Sprechen starten"}
-              </button>
-            ) : (
-              <button className="primary stop" disabled={busy} onClick={stop}>
-                {busy ? (
-                  <Loader2 size={18} className="spin" aria-hidden="true" />
-                ) : (
-                  <Square size={14} fill="currentColor" />
-                )}
-                {status === "connecting"
-                  ? "Verbinden …"
-                  : status === "draining"
-                    ? "Wird abgeschlossen …"
-                    : listener
-                      ? "Verlassen"
-                      : "Sprechen beenden"}
-              </button>
-            )}
-            {listener && (
-              <button
-                className="icon-button glass"
-                onClick={toggleMute}
-                aria-pressed={muted}
-                aria-label={muted ? "Ton einschalten" : "Ton stummschalten"}
-              >
-                {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-              </button>
-            )}
-            {!listener && room && (
-              <button
-                className="icon-button glass"
-                onClick={() => setShare(true)}
-                aria-label="Zuhörer einladen"
-              >
-                <Link size={20} />
-              </button>
-            )}
-          </div>
-          <p className="hint">
-            {listener
-              ? "Audio über die aktuell gewählten Lautsprecher oder Kopfhörer."
-              : room
-                ? `${count} ${count === 1 ? "Person hört" : "Personen hören"} zu · Link teilen und gemeinsam starten`
-                : "Handy, Mikrofon oder AirPods. Ein Fingertipp genügt."}
-          </p>
-          {!listener && devices.length > 1 && (
-            <ChipSelect
-              className="standalone glass"
-              label="Mikrofon"
-              value={device}
-              disabled={active}
-              options={[
-                ["", "Standardmikrofon"],
-                ...devices.map(
-                  (d) => [d.deviceId, d.label || "Mikrofon"] as [string, string],
-                ),
-              ]}
-              onChange={setDevice}
-            />
           )}
-          {listener && (
-            <details className="audio-check glass">
-              <summary>
-                Audio prüfen
-                <ChevronDown size={16} aria-hidden="true" />
-              </summary>
-              <div className="audio-body">
-                <dl>
-                  <dt>Audio-Pakete</dt>
-                  <dd>{audioInfo.chunks}</dd>
-                  <dt>Pegel</dt>
-                  <dd>{audioInfo.peak} %</dd>
-                  <dt>Wiedergabe</dt>
-                  <dd>{audioInfo.state}</dd>
-                  <dt>Ton</dt>
-                  <dd>{muted ? "stumm" : "an"}</dd>
-                </dl>
-                <div className="tone">
-                  <button className="secondary glass" onClick={testTone}>
-                    <Volume2 size={16} />
-                    Testton
-                  </button>
-                  <span>{toneResult}</span>
-                </div>
-              </div>
-            </details>
+          {!session && (
+            <p className="intro">
+              {listener
+                ? "Du hörst die Übersetzung und liest mit. Unten wählst du Ton, Text oder beides."
+                : "Sprich normal. Zuhörer hören die Übersetzung und lesen mit."}
+            </p>
           )}
-        </section>
-        {error && (
-          <div className="alert" role="alert">
-            <AlertCircle size={18} aria-hidden="true" />
-            <span>{error}</span>
-            <button
-              className="dismiss"
-              onClick={() => setError("")}
-              aria-label="Meldung schließen"
-            >
-              <X size={18} />
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div className="notice">
-            <Info size={18} aria-hidden="true" />
-            <span>{notice}</span>
-            <button
-              className="dismiss"
-              onClick={() => setNotice("")}
-              aria-label="Hinweis schließen"
-            >
-              <X size={18} />
-            </button>
-          </div>
-        )}
-        <section className="transcripts single">
           {!listener && (
-            <article className="card glass">
-              <div className="card-label">
-                <Mic size={15} />
-                Deine Worte
-                <span className="tag">{languages[source]}</span>
-              </div>
-              <div className="transcript" aria-live="polite">
-                {original || (
-                  <span className="placeholder">
-                    {transcription === "configured"
-                      ? "Deine gesprochenen Worte erscheinen hier mit kurzer Verzögerung."
-                      : "Die Cloud-Spracherkennung ist nicht eingerichtet. Übersetzen ist weiterhin möglich."}
+            <>
+              <div className="meta">
+                <span>{statusLabel[status]}</span>
+                {room && (
+                  <span>
+                    <strong>{count}</strong> {count === 1 ? "Zuhörer" : "Zuhörer"}
                   </span>
                 )}
-                <div ref={listener ? undefined : transcriptEnd} />
+                {devices.length > 1 && (
+                  <button className="textbutton" onClick={() => setSheet("device")} disabled={active}>
+                    <Mic size={14} aria-hidden="true" />
+                    {deviceLabel}
+                  </button>
+                )}
               </div>
-            </article>
+              <LevelMeter levels={levels} active={status === "live"} />
+            </>
           )}
-          {listener && <article className="card glass translation">
-            <div className="card-label">
-              <AudioLines size={15} />
-              Live-Übersetzung
-              <span className="tag">{languages[language]}</span>
-            </div>
-            <div className="transcript" aria-live="polite">
-              {text || (
-                <span className="placeholder">
-                  {listener
-                    ? "Sobald gesprochen wird, erscheinen die übersetzten Worte hier."
-                    : "Hier entsteht die Übersetzung. Wort für Wort."}
-                </span>
-              )}
-              <div ref={transcriptEnd} />
-            </div>
-          </article>}
-        </section>
-        {room && !listener && (
-          <button className="invite glass" onClick={() => setShare(true)}>
-            <span className="tile">
-              <Radio size={20} />
-            </span>
-            <span className="text">
-              <strong>Zuhörer einladen</strong>
-              <small>Ein Link. Beliebige Geräte. Gemeinsam zuhören.</small>
-            </span>
-            <ChevronRight size={20} aria-hidden="true" />
-          </button>
-        )}
+          {showAudio && !focus && (
+            mode === "audio" ? (
+              <div className="audio-stage">
+                <LevelMeter levels={levels} active={joined} className="large" />
+                <p className="status-line">{statusLabel[status]}</p>
+                <button className="textbutton" onClick={() => setSheet("audio")}>
+                  Audio prüfen
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="meta">
+                  <span>{statusLabel[status]}</span>
+                  <button className="textbutton" onClick={() => setSheet("audio")}>
+                    Audio prüfen
+                  </button>
+                </div>
+                <LevelMeter levels={levels} active={joined} className="small" />
+              </>
+            )
+          )}
+          {!focus && alerts}
+          {showText && (
+            <Captions
+              label={listener ? "Übersetzung" : "Deine Worte"}
+              lang={listener ? languages[language] : languages[source]}
+              text={listener ? text : original}
+              placeholder={
+                listener
+                  ? joined
+                    ? "Sobald gesprochen wird, steht die Übersetzung hier."
+                    : "Die Übersetzung erscheint hier, sobald du dabei bist."
+                  : transcription === "configured"
+                    ? "Deine gesprochenen Worte erscheinen hier mit kurzer Verzögerung."
+                    : "Die Spracherkennung ist nicht eingerichtet. Übersetzen geht trotzdem."
+              }
+              endRef={transcriptEnd}
+            />
+          )}
+          {mode === "audio" && listener && !focus && alerts}
+          {!session && (
+            <footer>
+              <span>Keine Anmeldung · Keine Aufzeichnung</span>
+              <a href="/local-ca.cer">iPhone-Zertifikat</a>
+            </footer>
+          )}
+        </div>
       </main>
-      <footer>
-        <span>Keine Anmeldung · Keine dauerhafte Aufzeichnung</span>
-        <span>
-          <span>LiteLLM Translate</span>
-          <a href="/local-ca.cer">iPhone-Zertifikat</a>
-        </span>
-      </footer>
-      {share && (
-        <div className="sheet-backdrop" onClick={closeShare}>
-          <section
-            ref={sheet}
-            className={"sheet glass " + (drag > 0 ? "is-dragging" : "")}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Sitzung teilen"
-            style={drag > 0 ? { transform: `translateY(${drag}px)` } : undefined}
-            onClick={(e) => e.stopPropagation()}
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
-            onTouchCancel={onTouchEnd}
-          >
-            <div className="grabber" aria-hidden="true" />
-            <button
-              className="close icon-button"
-              onClick={closeShare}
-              aria-label="Schließen"
-            >
-              <X size={20} />
+      {focus ? (
+        <button className="restore" onClick={() => setFocus(false)}>
+          <ChevronUp size={18} aria-hidden="true" />
+          Steuerung anzeigen
+        </button>
+      ) : (
+        <div className="dock">
+          <div className="dock-inner">
+            {listener && (
+              <div className="segmented" role="radiogroup" aria-label="Was du bekommst">
+                {modes.map((m) => (
+                  <button key={m.key} role="radio" aria-checked={mode === m.key} onClick={() => switchMode(m.key)}>
+                    {m.icon}
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="dock-row">
+              {listener ? (
+                !joined ? (
+                  <button className="btn btn-primary" onClick={start}>
+                    {mode === "text" ? <BookOpen size={18} /> : <Headphones size={18} />}
+                    <span>{mode === "text" ? "Mitlesen starten" : "Zuhören starten"}</span>
+                  </button>
+                ) : mode === "text" ? (
+                  <>
+                    <button className="btn btn-secondary" onClick={() => setSheet("textSize")}>
+                      <ALargeSmall size={20} />
+                      <span>{sizes[size].short}</span>
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => setFocus(true)}>
+                      <Maximize2 size={18} />
+                      <span>Fokus</span>
+                    </button>
+                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                      <LogOut size={18} />
+                      <span>Verlassen</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn btn-secondary" onClick={() => setAudio(muted)} aria-pressed={muted}>
+                      {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                      <span>{muted ? "Ton an" : "Ton aus"}</span>
+                    </button>
+                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                      {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <LogOut size={18} />}
+                      <span>{status === "connecting" ? "Verbindet …" : "Verlassen"}</span>
+                    </button>
+                  </>
+                )
+              ) : (
+                <>
+                  {!active ? (
+                    <button className="btn btn-primary" onClick={start}>
+                      <Mic size={18} />
+                      <span>{status === "ended" ? "Weiter sprechen" : "Sprechen starten"}</span>
+                    </button>
+                  ) : (
+                    <button className="btn btn-secondary" onClick={stop} disabled={busy}>
+                      {busy ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Square size={14} fill="currentColor" />}
+                      <span>
+                        {status === "connecting"
+                          ? "Verbindet …"
+                          : status === "draining"
+                            ? "Wird beendet …"
+                            : "Sprechen beenden"}
+                      </span>
+                    </button>
+                  )}
+                  {room && (
+                    <button className="btn btn-secondary btn-icon" onClick={() => setSheet("share")} aria-label="Zuhörer einladen">
+                      <Share size={20} />
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {sheet === "language" && (
+        <Sheet title={listener ? "Ich höre" : "Sprachen"} onClose={() => setSheet(null)}>
+          {listener ? (
+            <p>Gesprochen wird {languages[source]}. Wähle, in welcher Sprache du hören und lesen willst.</p>
+          ) : (
+            <>
+              <p>Zuhörer können ihre Sprache später selbst wählen.</p>
+              <div className="segmented" role="radiogroup" aria-label="Welche Sprache ändern">
+                <button role="radio" aria-checked={langTab === "source"} onClick={() => setLangTab("source")}>
+                  Gesprochen
+                </button>
+                <button role="radio" aria-checked={langTab === "target"} onClick={() => setLangTab("target")}>
+                  Übersetzt
+                </button>
+              </div>
+            </>
+          )}
+          <div className="options" role="radiogroup" aria-label="Sprache">
+            {languageOptions.map(([code, name]) => (
+              <Option
+                key={code}
+                label={name}
+                selected={(listener || langTab === "target" ? language : source) === code}
+                onSelect={() => pickLanguage(code)}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "textSize" && (
+        <Sheet title="Textgröße" onClose={() => setSheet(null)}>
+          <div className="options" role="radiogroup" aria-label="Textgröße">
+            {(Object.keys(sizes) as Size[]).map((key) => (
+              <Option
+                key={key}
+                label={sizes[key].label}
+                preview={<span className="preview" style={{ fontSize: sizes[key].preview }} aria-hidden="true">Aa</span>}
+                selected={size === key}
+                onSelect={() => {
+                  setSize(key);
+                  setSheet(null);
+                }}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "device" && (
+        <Sheet title="Mikrofon" onClose={() => setSheet(null)}>
+          <div className="options" role="radiogroup" aria-label="Mikrofon">
+            <Option label="Standardmikrofon" selected={device === ""} onSelect={() => { setDevice(""); setSheet(null); }} />
+            {devices.map((d) => (
+              <Option
+                key={d.deviceId}
+                label={d.label || "Mikrofon"}
+                selected={device === d.deviceId}
+                onSelect={() => {
+                  setDevice(d.deviceId);
+                  setSheet(null);
+                }}
+              />
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {sheet === "audio" && (
+        <Sheet title="Audio prüfen" onClose={() => setSheet(null)}>
+          <dl className="diag">
+            <dt>Audio-Pakete</dt>
+            <dd>{audioInfo.chunks}</dd>
+            <dt>Pegel</dt>
+            <dd>{audioInfo.peak} %</dd>
+            <dt>Wiedergabe</dt>
+            <dd>{audioInfo.state}</dd>
+            <dt>Ton</dt>
+            <dd>{muted ? "aus" : "an"}</dd>
+          </dl>
+          <div className="tone">
+            <button className="btn btn-secondary" onClick={testTone}>
+              <Volume2 size={18} />
+              <span>Testton</span>
             </button>
-            <h2>Gemeinsam zuhören.</h2>
-            <p>
-              QR-Code scannen oder Link öffnen.
-              <br />
-              Dann auf „Live zuhören“ tippen.
-            </p>
-            <div className="qr">
-              {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
+            <span>{toneResult}</span>
+          </div>
+          <small>Ton kommt über die aktuell gewählten Lautsprecher oder Kopfhörer.</small>
+        </Sheet>
+      )}
+      {sheet === "share" && (
+        <Sheet title="Zuhörer einladen" onClose={() => setSheet(null)}>
+          <p>QR-Code scannen oder Link öffnen, dann auf „Zuhören starten“ tippen.</p>
+          <div className="qr">
+            {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
+            <div>
               <QRCodeSVG value={link} size={168} level="M" bgColor="#ffffff" fgColor="#111111" />
             </div>
-            <div className="link-row">
-              <input
-                readOnly
-                aria-label="Zuhörerlink"
-                value={link}
-                onFocus={(e) => e.target.select()}
-              />
-              <button
-                className="icon-button glass"
-                onClick={copy}
-                aria-label={copied ? "Link kopiert" : "Link kopieren"}
-              >
-                {copied ? <Check size={18} /> : <Link size={18} />}
-              </button>
-            </div>
-            <button className="primary" onClick={canShare ? shareLink : copy}>
-              {canShare ? (
-                <Share size={18} />
-              ) : copied ? (
-                <Check size={18} />
-              ) : (
-                <Link size={18} />
-              )}
-              {canShare ? "Link teilen" : copied ? "Link kopiert" : "Link kopieren"}
+          </div>
+          <div className="link-row">
+            <input readOnly aria-label="Zuhörerlink" value={link} onFocus={(e) => e.target.select()} />
+            <button className="btn btn-secondary btn-icon" onClick={copy} aria-label={copied ? "Link kopiert" : "Link kopieren"}>
+              {copied ? <Check size={18} /> : <Link size={18} />}
             </button>
-            <small>
-              Im selben Netzwerk. Auf dem iPhone zuerst das lokale Zertifikat
-              installieren und ihm vertrauen.
-            </small>
-          </section>
-        </div>
+          </div>
+          <button className="btn btn-primary" onClick={canShare ? shareLink : copy}>
+            {canShare ? <Share size={18} /> : copied ? <Check size={18} /> : <Link size={18} />}
+            <span>{canShare ? "Link teilen" : copied ? "Link kopiert" : "Link kopieren"}</span>
+          </button>
+          <small>Im selben Netzwerk. Auf dem iPhone zuerst das lokale Zertifikat installieren und ihm vertrauen.</small>
+        </Sheet>
       )}
     </div>
   );

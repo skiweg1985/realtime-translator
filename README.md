@@ -13,7 +13,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open `https://YOUR_LAN_IP:8443` on devices on the same network. Allow microphone access, choose the spoken language and the default listener language and tap **Sprechen starten**. Share the listener link using the link button. Listeners choose **Ich höre** and tap **Live zuhören** to enable audio playback. They can change their language while listening; queued audio is stopped and the selected language's text replaces the previous transcript. Headphones and AirPods use the device's selected audio route; available microphone choices appear after microphone permission. Keep Safari open and the phone unlocked; background audio capture is not guaranteed.
+Open `https://YOUR_LAN_IP:8443` on devices on the same network. Allow microphone access, tap a language in the `Deutsch → English` line to change it, then tap **Sprechen starten**. Share the listener link with the share button in the bottom dock. Listeners pick **Ton + Text**, **Ton** or **Text** in their dock, tap **Zuhören starten** and change **Ich höre** by tapping the target language; text mode adds three text sizes and a focus view that hides everything except the live translation. They can change their language while listening; queued audio is stopped and the selected language's text replaces the previous transcript. Headphones and AirPods use the device's selected audio route; available microphone choices appear after microphone permission. Keep Safari open and the phone unlocked; background audio capture is not guaranteed.
 
 ## Develop the frontend
 
