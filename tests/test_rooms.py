@@ -61,4 +61,37 @@ class Rooms(unittest.TestCase):
             main.create_room(main.NewRoom(),request())
         self.assertEqual(raised.exception.status_code,503)
 
+class Ending(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        main.rooms.clear()
+        self.key = patch.object(main, 'KEY', 'test-only')
+        self.key.start()
+    async def asyncTearDown(self):
+        self.key.stop()
+        main.rooms.clear()
+    async def test_only_the_owner_ends_and_listeners_get_a_final_status(self):
+        created = main.create_room(main.NewRoom(), request())
+        room = main.rooms[created['id']]
+        closed = []
+        class Socket:
+            async def close(self, **kwargs):closed.append(kwargs)
+        peer = main.Peer(Socket())
+        peer.language = 'en'
+        room.peers.add(peer)
+        with self.assertRaises(HTTPException) as raised:
+            await main.end_room(created['id'], main.EndRoom(owner='wrong'), request())
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertIn(created['id'], main.rooms)
+        room.active = True
+        with self.assertRaises(HTTPException) as raised:
+            await main.end_room(created['id'], main.EndRoom(owner=created['owner']), request())
+        self.assertEqual(raised.exception.status_code, 409)
+        room.active = False
+        await main.end_room(created['id'], main.EndRoom(owner=created['owner']), request())
+        self.assertNotIn(created['id'], main.rooms)
+        self.assertEqual(peer.queue.get_nowait(), {'type': 'status', 'status': 'closed'})
+        self.assertEqual(closed, [{'code': 1000}])
+        with self.assertRaises(HTTPException):
+            main.room_info(created['id'])
+
 if __name__=='__main__':unittest.main()

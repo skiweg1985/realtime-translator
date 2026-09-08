@@ -23,6 +23,7 @@ import {
   ALargeSmall,
   Maximize2,
   LogOut,
+  House,
   Settings2,
   Camera,
 } from "lucide-react";
@@ -51,7 +52,7 @@ const languages: Record<string, string> = {
   zh: "中文",
 };
 const languageOptions = Object.entries(languages) as [string, string][];
-type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "draining" | "error";
+type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "closed" | "draining" | "error";
 type Role = "home" | "speaker" | "listener";
 type Mode = "both" | "audio" | "text";
 type Size = "normal" | "large" | "xl";
@@ -410,6 +411,8 @@ function App() {
   const selectedLanguage = useRef("en"), subscription = useRef(0);
   const audioNodes = useRef(new Set<AudioBufferSourceNode>());
   const [status, setStatus] = useState<Status>("idle");
+  const statusRef = useRef<Status>("idle");
+  const [ending, setEnding] = useState(false);
   const [original, setOriginal] = useState(""),
     [text, setText] = useState("");
   const [error, setError] = useState(""),
@@ -526,7 +529,8 @@ function App() {
   );
   const active = ["connecting", "live", "draining"].includes(status);
   const busy = status === "connecting" || status === "draining";
-  const joined = status !== "idle" && status !== "ended";
+  /* Zuhörer bleiben bei einer Pause verbunden, der Sprecher startet nach dem Stopp eine neue Übertragung. */
+  const joined = listener ? status !== "idle" : status !== "idle" && status !== "ended";
   const session = status !== "idle";
   const link = location.origin + "/#room=" + room;
   const canShare =
@@ -534,6 +538,32 @@ function App() {
   const clock =
     Math.floor(elapsed / 60) + ":" + String(elapsed % 60).padStart(2, "0");
   const languagesLocked = !listener && !!room;
+  function applyStatus(next: Status) {
+    statusRef.current = next;
+    setStatus(next);
+  }
+  function goHome() {
+    location.href = "/";
+    location.reload();
+  }
+  /* Beenden für alle: Zuhörer bekommen den Endzustand, der Raum verschwindet, zurück zur Startseite. */
+  async function endSession() {
+    if (!room) return;
+    setEnding(true);
+    try {
+      const r = await fetch("/api/rooms/" + room + "/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner }),
+      });
+      if (!r.ok && r.status !== 404) throw Error();
+      sessionStorage.removeItem("owner:" + room);
+      goHome();
+    } catch {
+      setError(t("errEnd"));
+      setEnding(false);
+    }
+  }
   function pushLevel(value: number) {
     const data = levels.current;
     data.copyWithin(0, 1);
@@ -614,7 +644,7 @@ function App() {
     clearPlayback();
     subscription.current += 1;
     if (listener && socket.current?.readyState === WebSocket.OPEN) {
-      setStatus("connecting");
+      applyStatus("connecting");
       socket.current.send(JSON.stringify({type: "subscribe", language: value, subscription: subscription.current}));
     }
   }
@@ -622,7 +652,7 @@ function App() {
     setError("");
     setNotice("");
     setElapsed(0);
-    setStatus("connecting");
+    applyStatus("connecting");
     if (listener) {
       const old = socket.current;
       socket.current = null;
@@ -698,7 +728,7 @@ function App() {
           selectedLanguage.current = event.language || language;
           setLanguage(selectedLanguage.current);
           setText(event.text || "");
-          setStatus(event.status || "waiting");
+          applyStatus(event.status || "waiting");
           setError(event.message);
           return;
         }
@@ -706,10 +736,10 @@ function App() {
         if (event.type === "snapshot") {
           setText(event.text);
           setOriginal(event.original);
-          setStatus(event.status);
+          applyStatus(event.status);
         }
         if (event.type === "status") {
-          setStatus(event.status);
+          applyStatus(event.status);
           if (event.status === "live" && !listener && !running.current) {
             running.current = true;
             const ctx = context.current!,
@@ -764,11 +794,18 @@ function App() {
       ws.onclose = () => {
         if (socket.current !== ws) return;
         stopMic();
-        setStatus((s) => (s === "idle" ? "idle" : "ended"));
+        if (!listener) {
+          applyStatus(statusRef.current === "idle" ? "idle" : "ended");
+          return;
+        }
+        /* Zuhörer: Ende bleibt sichtbar, jeder andere Abbruch heißt neu beitreten. */
+        if (statusRef.current === "closed") return;
+        if (statusRef.current !== "idle") setError(t("errDisconnected"));
+        applyStatus("idle");
       };
     } catch (e) {
       stopMic();
-      setStatus("idle");
+      applyStatus("idle");
       setError(describeError(e));
     }
   }
@@ -776,11 +813,14 @@ function App() {
     stopMic();
     if (listener) {
       clearPlayback();
-      socket.current?.close();
+      const old = socket.current;
+      socket.current = null;
+      old?.close();
       context.current?.close();
       context.current = null;
+      applyStatus("idle");
     } else {
-      setStatus("draining");
+      applyStatus("draining");
       socket.current?.send("stop");
     }
   }
@@ -803,7 +843,7 @@ function App() {
   }
   async function shareLink() {
     try {
-      await navigator.share({ title: "Translate Live", text: t("shareText", { code }), url: link });
+      await navigator.share({ title: "SONA Live", text: t("shareText", { code }), url: link });
     } catch {
       /* Abgebrochen oder nicht erlaubt: kein Fehler für den Nutzer. */
     }
@@ -885,6 +925,7 @@ function App() {
     live: listener ? t("statusLiveListener") : micMuted ? t("statusMuted") : t("statusLiveSpeaker"),
     waiting: t("statusWaiting"),
     ended: t("statusEnded"),
+    closed: t("statusClosed"),
     draining: t("statusDraining"),
     error: t("statusError"),
   };
@@ -894,9 +935,22 @@ function App() {
     live: t("stateLive"),
     waiting: t("stateWaiting"),
     ended: t("stateEnded"),
+    closed: t("stateClosed"),
     draining: t("stateDraining"),
     error: t("stateError"),
   };
+  /* Deutlicher Zwischenzustand statt nur eines Punkts oben rechts. */
+  const standby: [Key, Key] | null = listener
+    ? status === "waiting"
+      ? ["standbyWaitingTitle", "standbyWaitingText"]
+      : status === "ended"
+        ? ["standbyPausedTitle", "standbyPausedText"]
+        : status === "closed"
+          ? ["standbyClosedTitle", "standbyClosedText"]
+          : null
+    : status === "ended" && room
+      ? ["standbySpeakerTitle", "standbySpeakerText"]
+      : null;
   const deviceLabel =
     devices.find((d) => d.deviceId === device)?.label || t("micDefault");
   const showText = listener ? mode !== "audio" : true;
@@ -953,13 +1007,14 @@ function App() {
       </span>
     </>
   );
-  const brand = session ? (
+  /* Während einer laufenden Übertragung ist der Schriftzug kein Link, sonst führt er immer zur Startseite. */
+  const brand = active ? (
     <span className="brand">
-      Translate<b>Live</b>
+      SONA<b>Live</b>
     </span>
   ) : (
-    <a className="brand" href="/" aria-label={t("brandHome")}>
-      Translate<b>Live</b>
+    <a className="brand" href="/" aria-label={t("brandHome")} onClick={(e) => { e.preventDefault(); goHome(); }}>
+      SONA<b>Live</b>
     </a>
   );
   const sheets = (
@@ -1199,12 +1254,14 @@ function App() {
     return (
       <div className="app is-home">
         <header className="topbar">
-          {brand}
           {settingsButton}
         </header>
         <main>
           <div className="column">
-            <p className="intro">{t("homeIntro")}</p>
+            <div className="identity">
+              <span className="identity-name">SONA</span>
+              <span className="identity-desc">{t("productDescriptor")}</span>
+            </div>
             <div className="choices">
               <button className="choice" onClick={() => setRole("speaker")}>
                 <Mic size={28} aria-hidden="true" />
@@ -1223,9 +1280,6 @@ function App() {
                 <ChevronRight size={22} aria-hidden="true" />
               </button>
             </div>
-            <footer>
-              <span>{t("footerPrivacy")}</span>
-            </footer>
           </div>
         </main>
         {sheets}
@@ -1326,6 +1380,12 @@ function App() {
             )
           )}
           {!focus && alerts}
+          {standby && (
+            <div className={"standby " + status} role="status">
+              <strong>{t(standby[0])}</strong>
+              <span>{t(standby[1])}</span>
+            </div>
+          )}
           {showText && (
             <Captions
               label={listener ? t("captionsTranslation") : t("captionsYourWords")}
@@ -1333,9 +1393,11 @@ function App() {
               text={listener ? text : original}
               placeholder={
                 listener
-                  ? joined
-                    ? t("placeholderListenerJoined")
-                    : t("placeholderListenerIdle")
+                  ? standby
+                    ? ""
+                    : joined
+                      ? t("placeholderListenerJoined")
+                      : t("placeholderListenerIdle")
                   : transcription === "configured"
                     ? t("placeholderSpeaker")
                     : t("placeholderNoCaptions")
@@ -1369,7 +1431,12 @@ function App() {
             )}
             <div className="dock-row">
               {listener ? (
-                !joined ? (
+                status === "closed" ? (
+                  <button className="btn btn-primary" onClick={goHome}>
+                    <House size={18} />
+                    <span>{t("toHome")}</span>
+                  </button>
+                ) : !joined ? (
                   <button className="btn btn-primary" onClick={start}>
                     {mode === "text" ? <BookOpen size={18} /> : <Headphones size={18} />}
                     <span>{mode === "text" ? t("startRead") : t("startListen")}</span>
@@ -1403,10 +1470,16 @@ function App() {
                 )
               ) : !active ? (
                 <>
-                  <button className="btn btn-primary" onClick={start}>
+                  <button className="btn btn-primary" onClick={start} disabled={ending}>
                     <Mic size={18} />
                     <span>{status === "ended" ? t("resume") : t("start")}</span>
                   </button>
+                  {status === "ended" && room && (
+                    <button className="btn btn-secondary" onClick={endSession} disabled={ending}>
+                      {ending ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <LogOut size={18} />}
+                      <span>{t("endSession")}</span>
+                    </button>
+                  )}
                   {room && (
                     <button className="btn btn-secondary btn-icon" onClick={() => setSheet("share")} aria-label={t("invite")}>
                       <Share size={20} />

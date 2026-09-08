@@ -1,4 +1,6 @@
-# Translate Live
+# SONA Live
+
+Product name in the interface: SONA (wordmark `SONA Live` inside a session). The repository still says Translate Live in places.
 
 Real-time translation web app: one speaker, many listeners, audio and text. React + Vite frontend in `frontend/`, FastAPI backend in `backend/`, HAProxy for HTTPS, everything in `compose.yaml`.
 
