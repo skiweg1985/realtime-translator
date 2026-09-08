@@ -24,6 +24,7 @@ import {
   Maximize2,
   LogOut,
   Settings2,
+  Camera,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import "@fontsource-variable/inter/opsz.css";
@@ -153,6 +154,86 @@ function LevelMeter({
     return () => cancelAnimationFrame(frame);
   }, [active, levels]);
   return <canvas ref={ref} className={"meter " + className} aria-hidden="true" />;
+}
+
+/* QR-Scanner: Kamera-Vorschau, erkannt über BarcodeDetector oder jsQR als Fallback. */
+function Scanner({
+  onResult,
+  onError,
+}: {
+  onResult: (text: string) => void;
+  onError: () => void;
+}) {
+  const video = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    let stream: MediaStream | null = null,
+      stopped = false,
+      timer = 0;
+    const canvas = document.createElement("canvas");
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+      } catch {
+        onError();
+        return;
+      }
+      const v = video.current;
+      if (stopped || !v) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      v.srcObject = stream;
+      await v.play().catch(() => {});
+      const Detector = (window as any).BarcodeDetector;
+      let detector: any = null;
+      if (Detector) {
+        try {
+          detector = new Detector({ formats: ["qr_code"] });
+        } catch {
+          detector = null;
+        }
+      }
+      const jsQR = detector ? null : (await import("jsqr")).default;
+      const scan = async () => {
+        if (stopped) return;
+        if (v.readyState >= 2 && v.videoWidth) {
+          try {
+            if (detector) {
+              const codes = await detector.detect(v);
+              if (codes[0]?.rawValue) {
+                onResult(codes[0].rawValue);
+                return;
+              }
+            } else if (jsQR) {
+              const w = Math.min(640, v.videoWidth),
+                h = Math.round((w * v.videoHeight) / v.videoWidth);
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+              ctx.drawImage(v, 0, 0, w, h);
+              const image = ctx.getImageData(0, 0, w, h);
+              const found = jsQR(image.data, w, h, { inversionAttempts: "dontInvert" });
+              if (found?.data) {
+                onResult(found.data);
+                return;
+              }
+            }
+          } catch {}
+        }
+        timer = window.setTimeout(scan, 150);
+      };
+      scan();
+    })();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      stream?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+  return <video ref={video} className="scanner" playsInline muted autoPlay />;
 }
 
 /* Untertitel: Verlauf oben, aktueller Satz groß und unten verankert. */
@@ -347,8 +428,13 @@ function App() {
   const [focus, setFocus] = useState(false);
   const [sheet, setSheet] = useState<SheetKind>(null);
   const [langTab, setLangTab] = useState<"source" | "target">("target");
-  const [joinText, setJoinText] = useState(""),
-    [joinError, setJoinError] = useState("");
+  const [code, setCode] = useState("");
+  const [joinCode, setJoinCode] = useState(""),
+    [joinText, setJoinText] = useState(""),
+    [joinError, setJoinError] = useState(""),
+    [joining, setJoining] = useState(false),
+    [scanning, setScanning] = useState(false),
+    [linkField, setLinkField] = useState(false);
   const socket = useRef<WebSocket | null>(null),
     context = useRef<AudioContext | null>(null),
     stream = useRef<MediaStream | null>(null);
@@ -376,6 +462,7 @@ function App() {
             selectedLanguage.current = x.language;
           }
           setSource(x.source);
+          if (x.code) setCode(x.code);
         })
         .catch((e) => setError(e.message));
   }, []);
@@ -570,6 +657,7 @@ function App() {
           if (!response.ok) throw Error(data.detail || t("errRoom"));
           id = data.id;
           secret = data.owner;
+          setCode(data.code || "");
           sessionStorage.setItem("owner:" + id, secret);
           setRoom(id);
           setOwner(secret);
@@ -701,7 +789,7 @@ function App() {
   }
   async function shareLink() {
     try {
-      await navigator.share({ title: "Translate Live", url: link });
+      await navigator.share({ title: "Translate Live", text: t("shareText", { code }), url: link });
     } catch {
       /* Abgebrochen oder nicht erlaubt: kein Fehler für den Nutzer. */
     }
@@ -747,14 +835,35 @@ function App() {
     else setLanguage(code);
     setSheet(null);
   }
-  function join() {
-    const id = roomFromText(joinText);
+  function openRoom(id: string) {
+    location.assign("/#room=" + id);
+    location.reload();
+  }
+  function joinLink(value: string) {
+    const id = roomFromText(value);
     if (!id) {
       setJoinError(t("joinInvalid"));
       return;
     }
-    location.assign("/#room=" + id);
-    location.reload();
+    openRoom(id);
+  }
+  async function joinByCode(value: string) {
+    setJoining(true);
+    setJoinError("");
+    try {
+      const r = await fetch("/api/rooms/by-code/" + encodeURIComponent(value));
+      const x = await r.json();
+      if (!r.ok) throw Error(x.detail || t("joinCodeInvalid"));
+      openRoom(x.id);
+    } catch (e) {
+      setJoinError(e instanceof Error && e.message ? e.message : t("joinCodeInvalid"));
+      setJoining(false);
+    }
+  }
+  function closeJoin() {
+    setSheet(null);
+    setScanning(false);
+    setJoinError("");
   }
   const statusLabel: Record<Status, string> = {
     idle: listener ? t("statusIdleListener") : t("statusIdleSpeaker"),
@@ -863,33 +972,94 @@ function App() {
         </Sheet>
       )}
       {sheet === "join" && (
-        <Sheet title={t("joinTitle")} closeLabel={t("close")} onClose={() => setSheet(null)}>
-          <p>{t("joinHint")}</p>
-          <form
-            className="join"
-            onSubmit={(e) => {
-              e.preventDefault();
-              join();
-            }}
-          >
-            <input
-              aria-label={t("joinPlaceholder")}
-              placeholder={t("joinPlaceholder")}
-              value={joinText}
-              inputMode="url"
-              autoComplete="off"
-              autoCapitalize="off"
-              onChange={(e) => {
-                setJoinText(e.target.value);
-                setJoinError("");
-              }}
-            />
-            {joinError && <p className="field-error" role="alert">{joinError}</p>}
-            <button className="btn btn-primary" type="submit" disabled={!joinText.trim()}>
-              <Headphones size={18} />
-              <span>{t("joinButton")}</span>
-            </button>
-          </form>
+        <Sheet title={scanning ? t("joinScan") : t("joinTitle")} closeLabel={t("close")} onClose={closeJoin}>
+          {scanning ? (
+            <>
+              <p>{t("scanHint")}</p>
+              <Scanner
+                onResult={(value) => {
+                  setScanning(false);
+                  joinLink(value);
+                }}
+                onError={() => {
+                  setScanning(false);
+                  setJoinError(t("scanDenied"));
+                }}
+              />
+              <button className="btn btn-secondary" onClick={() => setScanning(false)}>
+                <span>{t("cancel")}</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <p>{t("joinCodeHint")}</p>
+              <form
+                className="join"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (joinCode.length === 4 && !joining) joinByCode(joinCode);
+                }}
+              >
+                <input
+                  className="code-input"
+                  aria-label={t("joinCode")}
+                  placeholder="0000"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoComplete="one-time-code"
+                  maxLength={4}
+                  value={joinCode}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, "").slice(0, 4);
+                    setJoinCode(digits);
+                    setJoinError("");
+                    if (digits.length === 4 && !joining) joinByCode(digits);
+                  }}
+                />
+                {joinError && <p className="field-error" role="alert">{joinError}</p>}
+                <button className="btn btn-primary" type="submit" disabled={joinCode.length !== 4 || joining}>
+                  {joining ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Headphones size={18} />}
+                  <span>{joining ? t("joining") : t("joinButton")}</span>
+                </button>
+              </form>
+              <div className="divider" aria-hidden="true">
+                <span>{t("joinOr")}</span>
+              </div>
+              <button className="btn btn-secondary" onClick={() => { setJoinError(""); setScanning(true); }}>
+                <Camera size={18} />
+                <span>{t("joinScan")}</span>
+              </button>
+              {linkField ? (
+                <form
+                  className="join"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    joinLink(joinText);
+                  }}
+                >
+                  <input
+                    aria-label={t("joinPlaceholder")}
+                    placeholder={t("joinPlaceholder")}
+                    value={joinText}
+                    inputMode="url"
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    onChange={(e) => {
+                      setJoinText(e.target.value);
+                      setJoinError("");
+                    }}
+                  />
+                  <button className="btn btn-secondary" type="submit" disabled={!joinText.trim()}>
+                    <span>{t("joinButton")}</span>
+                  </button>
+                </form>
+              ) : (
+                <button className="textbutton centered" onClick={() => setLinkField(true)}>
+                  {t("joinLinkToggle")}
+                </button>
+              )}
+            </>
+          )}
         </Sheet>
       )}
       {sheet === "language" && (
@@ -982,6 +1152,14 @@ function App() {
       )}
       {sheet === "share" && (
         <Sheet title={t("invite")} closeLabel={t("close")} onClose={() => setSheet(null)}>
+          {code && (
+            <>
+              <p>{t("shareCode")}</p>
+              <div className="code-big" aria-label={t("codeLabel") + " " + code}>
+                {code}
+              </div>
+            </>
+          )}
           <p>{t("shareHint")}</p>
           <div className="qr">
             {/* QR bleibt in beiden Farbschemata schwarz auf weiß, sonst scannt er nicht zuverlässig. */}
@@ -1097,6 +1275,11 @@ function App() {
                 {room && (
                   <span>
                     <strong>{count}</strong> {count === 1 ? t("listenersOne") : t("listenersMany")}
+                  </span>
+                )}
+                {code && (
+                  <span>
+                    {t("codeLabel")} <strong className="code">{code}</strong>
                   </span>
                 )}
                 {devices.length > 1 && (
