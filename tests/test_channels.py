@@ -12,8 +12,10 @@ class Socket:
 
 class FakeChannel:
     instances = []
-    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None):
+    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None, headers=None):
         self.language = language
+        self.url = url
+        self.headers = headers
         self.publish = publish
         self.noise_reduction = noise_reduction
         self.transcribe = transcribe
@@ -147,6 +149,23 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         loud = (b'\x10\x27' * 2400)
         self.assertFalse(main.is_quiet(loud))
 
+    async def test_selected_azure_provider_reaches_room_channels_and_health(self):
+        from provider import provider_settings
+        provider = provider_settings({'TRANSLATE_PROVIDER': 'azure',
+                                      'AZURE_OPENAI_ENDPOINT': 'https://example.openai.azure.com',
+                                      'AZURE_OPENAI_DEPLOYMENT': 'translate',
+                                      'AZURE_OPENAI_API_KEY': 'azure-test'})
+        with patch.object(main, 'PROVIDER', provider), patch.object(main, 'URL', provider.url), patch.object(main, 'KEY', provider.key):
+            await self.join('en')
+            await self.join('fr')
+            health = main.health()
+        for channel in self.room.channels.values():
+            self.assertEqual(channel.url, provider.url)
+            self.assertEqual(channel.headers, {'api-key': 'azure-test'})
+        self.assertEqual(health['translation_provider'], 'azure')
+        self.assertTrue(health['translation_configured'])
+        self.assertNotIn('azure-test', str(health))
+
     async def test_waiting_room_does_not_open_upstreams(self):
         self.room.active = False
         await self.join('fr')
@@ -182,12 +201,23 @@ class SessionUpdate(unittest.IsolatedAsyncioTestCase):
             async def __aenter__(self):return Socket()
             async def __aexit__(self, *args):pass
         async def publish(event):published.append(event)
-        with patch('channels.websockets.connect', return_value=Connection()):
+        with patch('channels.websockets.connect', return_value=Connection()) as connect:
             channel = TranslationChannel('fr', 'wss://test', 'test', publish, **kwargs)
             channel.start()
             await asyncio.wait_for(channel.task, 2)
+        self.assertEqual(connect.call_args.kwargs['additional_headers'],
+                         kwargs.get('headers', {'Authorization': 'Bearer test'}))
         self.assertEqual(sent[0]['type'], 'session.update')
         return sent[0]['session'], published
+
+    async def test_azure_handshake_uses_only_api_key_header(self):
+        from provider import provider_settings
+        provider = provider_settings({'TRANSLATE_PROVIDER': 'azure',
+                                      'AZURE_OPENAI_ENDPOINT': 'https://example.openai.azure.com',
+                                      'AZURE_OPENAI_DEPLOYMENT': 'translate',
+                                      'AZURE_OPENAI_API_KEY': 'azure-test'})
+        session, _ = await self.open_channel({'type': 'session.updated'}, headers=provider.headers())
+        self.assertEqual(session, {'audio': {'output': {'language': 'fr'}}})
 
     async def test_noise_reduction_is_sent_only_when_configured(self):
         session, _ = await self.open_channel({'type': 'session.updated'})

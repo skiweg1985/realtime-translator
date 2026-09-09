@@ -15,13 +15,12 @@ def upstream_message(event):
 
 
 class TranslationChannel:
-    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None):
+    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None, headers=None):
         self.language = language
         self.url = url
-        self.key = key
+        self.headers = headers if headers is not None else {'Authorization': 'Bearer ' + key}
         self.publish = publish
-        # 'near_field' or 'far_field'; None omits audio.input entirely, which the
-        # LiteLLM translation route currently requires (see README).
+        # None omits the noise reduction setting from session.update.
         self.noise_reduction = noise_reduction
         # Model name for audio.input.transcription; only one channel per room carries the original text.
         self.transcribe = transcribe
@@ -52,7 +51,7 @@ class TranslationChannel:
     async def run(self):
         sender = receiver = None
         try:
-            async with websockets.connect(self.url, additional_headers={'Authorization': 'Bearer ' + self.key},
+            async with websockets.connect(self.url, additional_headers=self.headers,
                                           proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as ws:
                 session = {'audio': {'output': {'language': self.language}}}
                 audio_input = {}

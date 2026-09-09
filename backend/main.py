@@ -1,4 +1,4 @@
-"""Single-worker, ephemeral rooms bridging browsers to LiteLLM Translate."""
+"""Single-worker, ephemeral rooms bridging browsers to a translation provider."""
 import array
 import asyncio
 import contextlib
@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from channels import TranslationChannel
+from provider import provider_settings
 
 log = logging.getLogger(__name__)
 
@@ -22,8 +23,9 @@ MAX_LANGUAGES = 4
 
 # Keep identical to `languages` in frontend/src/main.tsx (tests/test_rooms.py checks this).
 LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'ru', 'ar', 'hi', 'id', 'vi', 'ja', 'ko', 'zh'}
-URL = os.getenv('TRANSLATE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime/translations?model=azure-live-translate')
-KEY = os.getenv('TRANSLATE_KEY', '')
+PROVIDER = provider_settings()
+URL = PROVIDER.url
+KEY = PROVIDER.key
 
 def speaker_pin_setting():
     value = os.getenv('SPEAKER_PIN', '0000')
@@ -86,7 +88,7 @@ app = FastAPI()
 
 @app.get('/api/health')
 def health():
-    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
+    return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
             'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'}}
 
 class NewRoom(BaseModel):
@@ -204,7 +206,7 @@ def ensure_channel(room, language):
             room.translations[language] = (text + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
-    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=room_noise_reduction(room),
+    channel = TranslationChannel(language, URL, KEY, publish, headers=PROVIDER.headers(), noise_reduction=room_noise_reduction(room),
                                  transcribe=TRANSCRIPTION_MODEL if language == room.language else None)
     room.channels[language] = channel
     channel.start()
