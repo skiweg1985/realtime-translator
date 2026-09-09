@@ -51,7 +51,7 @@ On desktop, import `certs/ca.crt` instead. The server certificate is valid 90 da
 
 The screenshots show the German interface. The code and localhost link are examples from a session that has been ended; use the code or link from your own session.
 
-<!-- Screenshots: German UI, 390 x 740; home in both themes, guide in light. Refresh the affected images together when these flows change, and end the capture session afterward. -->
+<!-- Screenshots: German UI, 390 px wide; home in both themes, guide in light. Refresh the affected images together when these flows change, and end the capture session afterward. -->
 
 ### Speaker
 
