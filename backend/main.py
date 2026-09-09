@@ -24,6 +24,14 @@ MAX_LANGUAGES = 4
 LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'ru', 'ar', 'hi', 'id', 'vi', 'ja', 'ko', 'zh'}
 URL = os.getenv('TRANSLATE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime/translations?model=azure-live-translate')
 KEY = os.getenv('TRANSLATE_KEY', '')
+
+def speaker_pin_setting():
+    value = os.getenv('SPEAKER_PIN', '0000')
+    if len(value) != 4 or not value.isascii() or not value.isdigit():
+        raise ValueError('SPEAKER_PIN must contain exactly four digits.')
+    return value
+
+SPEAKER_PIN = speaker_pin_setting()
 # Original-language captions come from audio.input.transcription on the room language's channel; 'off' disables them.
 TRANSCRIPTION_MODEL = os.getenv('TRANSLATE_TRANSCRIPTION_MODEL', 'gpt-realtime-whisper').strip()
 if TRANSCRIPTION_MODEL.lower() == 'off':
@@ -84,12 +92,15 @@ def health():
 class NewRoom(BaseModel):
     language: str = 'en'
     source: str = 'de'
+    pin: str = ''
 
 @app.post('/api/rooms')
 def create_room(body: NewRoom, request: Request):
     origin = request.headers.get('origin')
     if origin and origin.split('://', 1)[-1] != request.headers.get('host'):
         raise HTTPException(403, 'Origin rejected')
+    if not secrets.compare_digest(body.pin.encode('utf-8'), SPEAKER_PIN.encode('utf-8')):
+        raise HTTPException(403, 'Invalid speaker PIN')
     for room_id, room in list(rooms.items()):
         if not room.active and time.monotonic() - room.created > 7200:
             del rooms[room_id]

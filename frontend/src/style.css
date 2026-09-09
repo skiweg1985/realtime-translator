@@ -885,6 +885,17 @@ button.lang:active {
 .field-label + .segmented {
   margin-top: 0;
 }
+.prepare-route {
+  margin-top: var(--space-3);
+  grid-template-columns: minmax(0, 1fr) minmax(24px, .3fr) minmax(0, 1fr);
+}
+.prepare-back {
+  margin-top: var(--space-2);
+}
+.prepare-route .lang small {
+  margin-top: 0;
+  font-size: 11px;
+}
 .join {
   display: flex;
   flex-direction: column;
