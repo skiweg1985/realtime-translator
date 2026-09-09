@@ -12,10 +12,11 @@ class Socket:
 
 class FakeChannel:
     instances = []
-    def __init__(self, language, url, key, publish, noise_reduction=None):
+    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None):
         self.language = language
         self.publish = publish
         self.noise_reduction = noise_reduction
+        self.transcribe = transcribe
         self.status = 'live'
         self.spoke = False
         self.task = None
@@ -75,7 +76,26 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(old.closed)
         self.assertEqual(set(self.room.channels),{'en','es','it','pl'})
 
+    async def test_only_the_room_language_channel_carries_captions_for_everyone(self):
+        speaker = main.Peer(Socket());self.room.peers.add(speaker)
+        a = await self.join('en');b = await self.join('fr')
+        self.assertEqual({l: c.transcribe for l, c in self.room.channels.items()}, {'en': main.TRANSCRIPTION_MODEL, 'fr': None})
+        self.assertTrue(main.TRANSCRIPTION_MODEL)
+        await self.room.channels['en'].publish({'type': 'original_delta', 'delta': ' Guten'})
+        await self.room.channels['en'].publish({'type': 'original_delta', 'delta': ' Abend'})
+        self.assertEqual(self.room.original, ' Guten Abend')
+        for peer in (speaker, a, b):
+            self.assertEqual([e['text'] for e in [peer.queue.get_nowait(), peer.queue.get_nowait()]], [' Guten', ' Guten Abend'])
+        # The caption channel survives the last listener of that language switching away while speaking.
+        await main.subscribe(self.room, a, 'es', 2)
+        self.assertIn('en', self.room.channels)
+        self.assertFalse(self.room.channels['en'].closed)
+        self.room.active = False
+        await main.prune_channels(self.room)
+        self.assertNotIn('en', self.room.channels)
+
     async def test_switch_clears_old_language_queue_and_releases_last_slot(self):
+        self.room.language = 'de'
         a = await self.join('en');old = self.room.channels['en']
         await old.publish({'type':'audio','delta':'stale'})
         await main.subscribe(self.room,a,'fr',2)
@@ -111,13 +131,18 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         old = dict(self.room.channels)
         self.room.noise_reduction = 'near_field'
         await main.swap_channels(self.room)
-        await asyncio.gather(*self.room.retiring, return_exceptions=True)
-        self.assertEqual({l: c.noise_reduction for l, c in self.room.channels.items()}, {'en': 'near_field', 'fr': 'near_field'})
-        self.assertTrue(all(c.fed == [None] and c.closed for c in old.values()))
+        # Before the old channel is done, its tail passes and the new channel's output waits.
         await old['en'].publish({'type': 'status', 'status': 'ended'})
         await old['en'].publish({'type': 'audio', 'delta': 'tail'})
+        await self.room.channels['en'].publish({'type': 'audio', 'delta': 'fresh'})
         self.assertEqual(a.queue.get_nowait()['delta'], 'tail')
         self.assertTrue(a.queue.empty())
+        await asyncio.gather(*self.room.retiring, return_exceptions=True)
+        self.assertEqual(a.queue.get_nowait()['delta'], 'fresh')
+        await self.room.channels['en'].publish({'type': 'audio', 'delta': 'later'})
+        self.assertEqual(a.queue.get_nowait()['delta'], 'later')
+        self.assertEqual({l: c.noise_reduction for l, c in self.room.channels.items()}, {'en': 'near_field', 'fr': 'near_field'})
+        self.assertTrue(all(c.fed == [None] and c.closed for c in old.values()))
         self.assertTrue(main.is_quiet(bytes(4800)))
         loud = (b'\x10\x27' * 2400)
         self.assertFalse(main.is_quiet(loud))
