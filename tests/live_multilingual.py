@@ -1,6 +1,7 @@
 """Paid acceptance: four languages, sharing, switching, and a rejected fifth language."""
 import asyncio
 import json
+import os
 import sys
 import urllib.request
 import wave
@@ -14,7 +15,7 @@ async def run():
         assert (f.getframerate(), f.getnchannels(), f.getsampwidth()) == (24000, 1, 2)
         pcm = f.readframes(f.getnframes())
     assert pcm, 'Empty audio fixture'
-    request = urllib.request.Request(base + '/api/rooms', data=b'{"source":"de","language":"en"}',
+    request = urllib.request.Request(base + '/api/rooms', data=json.dumps({"source": "de", "language": "en", "pin": os.getenv("SPEAKER_PIN", "0000")}).encode(),
                                      headers={'Content-Type':'application/json'})
     with urllib.request.urlopen(request, timeout=10) as response:
         room = json.load(response)

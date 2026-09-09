@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronRight,
+  ChevronLeft,
   Link,
   Share,
   Loader2,
@@ -57,7 +58,7 @@ type Role = "home" | "speaker" | "listener";
 type Mode = "both" | "audio" | "text";
 type Size = "normal" | "large" | "xl";
 type Theme = "system" | "light" | "dark";
-type SheetKind = "language" | "share" | "textSize" | "device" | "audio" | "settings" | "join" | null;
+type SheetKind = "language" | "share" | "textSize" | "device" | "audio" | "settings" | "join" | "prepare" | null;
 const sizes: Record<Size, { label: Key; short: Key; scale: number; preview: number }> = {
   normal: { label: "sizeNormal", short: "sizeNormal", scale: 1, preview: 17 },
   large: { label: "sizeLarge", short: "sizeLarge", scale: 1.25, preview: 22 },
@@ -312,11 +313,13 @@ function Sheet({
   title,
   closeLabel,
   onClose,
+  closeDisabled = false,
   children,
 }: {
   title: string;
   closeLabel: string;
   onClose: () => void;
+  closeDisabled?: boolean;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLElement>(null);
@@ -324,8 +327,23 @@ function Sheet({
   const start = useRef<number | null>(null),
     now = useRef(0);
   useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    ref.current?.querySelector<HTMLButtonElement>(".close")?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, []);
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      if (e.key !== "Tab") return;
+      const controls = Array.from(ref.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex='0']") || []);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !ref.current?.contains(document.activeElement))) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !ref.current?.contains(document.activeElement))) {
+        e.preventDefault();
+        first?.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -365,7 +383,7 @@ function Sheet({
         <div className="grabber" aria-hidden="true" />
         <div className="sheet-head">
           <h2>{title}</h2>
-          <button className="close" onClick={onClose} aria-label={closeLabel}>
+          <button className="close" onClick={onClose} aria-label={closeLabel} disabled={closeDisabled}>
             <X size={22} />
           </button>
         </div>
@@ -477,6 +495,12 @@ function App() {
   const [sheet, setSheet] = useState<SheetKind>(null);
   const [langTab, setLangTab] = useState<"source" | "target">("target");
   const [code, setCode] = useState("");
+  const [pin, setPin] = useState("");
+  const [prepareError, setPrepareError] = useState("");
+  const [preparing, setPreparing] = useState(false);
+  const preparingRef = useRef(false);
+  const [prepareLanguage, setPrepareLanguage] = useState<"source" | "target" | null>(null);
+  const prepareRoute = useRef<HTMLDivElement>(null);
   const [joinCode, setJoinCode] = useState(""),
     [joinText, setJoinText] = useState(""),
     [joinError, setJoinError] = useState(""),
@@ -594,6 +618,50 @@ function App() {
     history.replaceState(null, "", "/");
     location.reload();
   }
+  function closePrepare() {
+    if (preparingRef.current) return;
+    setPin("");
+    setPrepareError("");
+    setPrepareLanguage(null);
+    setSheet(null);
+  }
+  function returnToPrepare() {
+    const side = prepareLanguage;
+    setPrepareLanguage(null);
+    requestAnimationFrame(() => prepareRoute.current?.querySelector<HTMLButtonElement>(".lang-" + side)?.focus());
+  }
+  async function prepareSession() {
+    if (preparingRef.current || !/^[0-9]{4}$/.test(pin)) return;
+    preparingRef.current = true;
+    setPreparing(true);
+    setPrepareError("");
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, language, pin }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw Error(response.status === 403 ? t("errPin") : typeof data.detail === "string" ? data.detail : t("errRoom"));
+      }
+      sessionStorage.setItem("owner:" + data.id, data.owner);
+      setRoom(data.id);
+      setOwner(data.owner);
+      setCode(data.code);
+      setPin("");
+      setError("");
+      applyStatus("idle");
+      setRole("speaker");
+      history.replaceState(null, "", "#room=" + data.id);
+      setSheet("share");
+    } catch (e) {
+      setPrepareError(e instanceof Error ? e.message : t("errRoom"));
+    } finally {
+      preparingRef.current = false;
+      setPreparing(false);
+    }
+  }
   /* Beenden für alle: Zuhörer bekommen den Endzustand, der Raum verschwindet, zurück zur Startseite. */
   async function endSession() {
     if (!room) return;
@@ -710,9 +778,9 @@ function App() {
       selectedLanguage.current = language;
     }
     try {
+      if (!listener && (!room || !owner)) throw Error(t("errRoom"));
       await setupAudio(); // Must start inside the user's gesture on iOS.
-      let id = room,
-        secret = owner;
+      const id = room, secret = owner;
       if (!listener) {
         if (!navigator.mediaDevices?.getUserMedia) throw Error(t("errHttps"));
         stream.current = await navigator.mediaDevices.getUserMedia({
@@ -730,22 +798,6 @@ function App() {
           ),
         );
         await context.current!.audioWorklet.addModule("/capture.js");
-        if (!id) {
-          const response = await fetch("/api/rooms", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ source, language }),
-          });
-          const data = await response.json();
-          if (!response.ok) throw Error(data.detail || t("errRoom"));
-          id = data.id;
-          secret = data.owner;
-          setCode(data.code || "");
-          sessionStorage.setItem("owner:" + id, secret);
-          setRoom(id);
-          setOwner(secret);
-          history.replaceState(null, "", "#room=" + id);
-        }
       }
       if ("wakeLock" in navigator)
         try {
@@ -1072,6 +1124,61 @@ function App() {
   );
   const sheets = (
     <>
+      {sheet === "prepare" && (
+        <Sheet title={t(prepareLanguage ? "sheetLanguages" : "prepareTitle")} closeLabel={t("close")} onClose={closePrepare} closeDisabled={preparing}>
+          {prepareLanguage ? (
+            <>
+              <button className="textbutton prepare-back" onClick={returnToPrepare} autoFocus>
+                <ChevronLeft size={18} aria-hidden="true" />
+                {t("back")}
+              </button>
+              <Segmented
+                value={prepareLanguage}
+                label={t("whichLanguage")}
+                options={[
+                  { key: "source" as const, label: t("spoken") },
+                  { key: "target" as const, label: t("translated") },
+                ]}
+                onChange={setPrepareLanguage}
+              />
+              <div className="options" role="radiogroup" aria-label={t("language")}>
+                {languageOptions.map(([value, name]) => (
+                  <Option key={value} label={name} selected={(prepareLanguage === "source" ? source : language) === value}
+                    onSelect={() => {
+                      if (prepareLanguage === "source") setSource(value);
+                      else setLanguage(value);
+                      returnToPrepare();
+                    }} />
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="route idle prepare-route" ref={prepareRoute}>
+                <button className="lang lang-source" disabled={preparing} onClick={() => setPrepareLanguage("source")} aria-label={t("changeSpoken", { lang: languages[source] })}>
+                  {sourceLang}
+                </button>
+                <span className="route-line" aria-hidden="true" />
+                <button className="lang lang-target" disabled={preparing} onClick={() => setPrepareLanguage("target")} aria-label={t("changeTranslated", { lang: languages[language] })}>
+                  {targetLang}
+                </button>
+              </div>
+              <form className="join" onSubmit={(e) => { e.preventDefault(); prepareSession(); }} aria-busy={preparing}>
+                <label className="field-label" htmlFor="speaker-pin">{t("speakerPin")}</label>
+                <input id="speaker-pin" type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4}
+                  autoComplete="off" value={pin} disabled={preparing} required
+                  aria-invalid={!!prepareError} aria-describedby={prepareError ? "prepare-error" : undefined}
+                  onChange={(e) => { setPin(e.target.value.replace(/\D/g, "").slice(0, 4)); setPrepareError(""); }} />
+                {prepareError && <p className="field-error" id="prepare-error" role="alert">{prepareError}</p>}
+                <button className="btn btn-primary" type="submit" disabled={pin.length !== 4 || preparing}>
+                  {preparing ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
+                  <span>{t(preparing ? "preparing" : "prepareTitle")}</span>
+                </button>
+              </form>
+            </>
+          )}
+        </Sheet>
+      )}
       {sheet === "settings" && (
         <Sheet title={t("settings")} closeLabel={t("close")} onClose={() => setSheet(null)}>
           <p className="field-label">{t("settingsLanguage")}</p>
@@ -1337,7 +1444,7 @@ function App() {
               <VoiceLine values={IDLE_VOICE} />
             </div>
             <div className="choices">
-              <button className="choice" onClick={() => setRole("speaker")}>
+              <button className="choice" onClick={() => setSheet("prepare")}>
                 <Mic size={28} aria-hidden="true" />
                 <span className="choice-text">
                   <strong>{t("homeSpeak")}</strong>
@@ -1410,7 +1517,7 @@ function App() {
           {!listener && (
             <>
               <div className="meta">
-                {room && (
+                {room && status !== "idle" && (
                   <span>
                     <strong>{count}</strong> {count === 1 ? t("listenersOne") : t("listenersMany")}
                   </span>
@@ -1537,10 +1644,10 @@ function App() {
                     <Mic size={18} />
                     <span>{status === "ended" ? t("resume") : t("start")}</span>
                   </button>
-                  {status === "ended" && room && (
-                    <button className="btn btn-secondary" onClick={endSession} disabled={ending}>
+                  {room && (
+                    <button className={"btn btn-secondary" + (status === "ended" ? "" : " btn-icon")} onClick={endSession} disabled={ending} aria-label={t("endSession")} title={t("endSession")}>
                       {ending ? <Loader2 size={18} className="spin" aria-hidden="true" /> : <LogOut size={18} />}
-                      <span>{t("endSession")}</span>
+                      {status === "ended" && <span>{t("endSession")}</span>}
                     </button>
                   )}
                   {room && (

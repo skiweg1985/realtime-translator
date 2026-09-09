@@ -1,6 +1,7 @@
 """Bounded real-endpoint smoke test: synthetic PCM -> speaker -> two listeners."""
 import asyncio
 import json
+import os
 import ssl
 import sys
 import time
@@ -14,7 +15,7 @@ async def main():
     with wave.open(sys.argv[2], 'rb') as f:
         assert (f.getframerate(), f.getnchannels(), f.getsampwidth()) == (24000, 1, 2)
         pcm = f.readframes(f.getnframes())
-    req = urllib.request.Request(base+'/api/rooms', data=b'{"source":"de","language":"en"}', headers={'Content-Type':'application/json'})
+    req = urllib.request.Request(base+'/api/rooms', data=json.dumps({"source": "de", "language": "en", "pin": os.getenv("SPEAKER_PIN", "0000")}).encode(), headers={'Content-Type':'application/json'})
     room = json.load(urllib.request.urlopen(req, context=ssl_context))
     url = base.replace('https:', 'wss:')+'/api/rooms/'+room['id']+'/ws'
     options = {'ssl':ssl_context, 'proxy':None}
