@@ -19,10 +19,22 @@ from provider import provider_settings
 
 log = logging.getLogger(__name__)
 
-MAX_LANGUAGES = 4
-
 # Keep identical to `languages` in frontend/src/main.tsx (tests/test_rooms.py checks this).
 LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'ru', 'ar', 'hi', 'id', 'vi', 'ja', 'ko', 'zh'}
+def integer_setting(name, default, minimum, maximum=None):
+    value = os.getenv(name, str(default)).strip()
+    if not value.isascii() or not value.isdigit():
+        raise ValueError(f'{name} must be a whole number.')
+    number = int(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        limit = f'{minimum}..{maximum}' if maximum is not None else f'at least {minimum}'
+        raise ValueError(f'{name} must be {limit}.')
+    return number
+
+
+MAX_LANGUAGES = integer_setting('MAX_LANGUAGES', 4, 1, len(LANGUAGES))
+MAX_BROADCAST_SECONDS = integer_setting('MAX_BROADCAST_SECONDS', 3600, 0)
+
 PROVIDER = provider_settings()
 URL = PROVIDER.url
 KEY = PROVIDER.key
@@ -89,7 +101,8 @@ app = FastAPI()
 @app.get('/api/health')
 def health():
     return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
-            'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'}}
+            'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'},
+            'limits': {'max_languages': MAX_LANGUAGES, 'max_broadcast_seconds': MAX_BROADCAST_SECONDS}}
 
 class NewRoom(BaseModel):
     language: str = 'en'
@@ -288,7 +301,7 @@ async def subscribe(room, peer, language, subscription):
         if len(wanted | {language, room.language}) > MAX_LANGUAGES:
             await peer.queue.put({'type': 'subscription_rejected', 'subscription': subscription,
                                   'language': peer.language, 'active_subscription': peer.subscription,
-                                  'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language), 'message': 'Es sind bereits vier Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
+                                  'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language), 'message': f'Es sind bereits {MAX_LANGUAGES} Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
             return False
         peer.language = language
         peer.subscription = subscription
@@ -314,7 +327,7 @@ async def translation(room, ws, speaker):
     swap = None  # frames waited for a pause since the speaker changed a setting
     quiet = 0
     try:
-        async with asyncio.timeout(600):
+        async with asyncio.timeout(MAX_BROADCAST_SECONDS or None):
             while True:
                 message = await ws.receive()
                 if message['type'] == 'websocket.disconnect':

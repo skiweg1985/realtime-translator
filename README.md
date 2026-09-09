@@ -10,7 +10,7 @@ Keine Accounts, keine Datenbank und keine Aufzeichnung.
 ## Features
 
 - Live-Übersetzung von Audio und Text
-- Ein Sprecher, bis zu 31 Zuhörer und 4 Zielsprachen gleichzeitig
+- Ein Sprecher, bis zu 31 Zuhörer und mehrere Zielsprachen gleichzeitig
 - Beitritt per Code, Link oder QR-Code
 - Audio, Text oder Audio + Text
 - Sprecherzugang per PIN
@@ -65,6 +65,8 @@ Die Verbindung wird in der serverseitigen `.env` hinterlegt. Der Browser erhält
 | `AZURE_OPENAI_ENDPOINT` | – | Azure-Ressourcen-Endpunkt; bei `azure` erforderlich |
 | `AZURE_OPENAI_DEPLOYMENT` | – | Azure-Deployment-Name; bei `azure` erforderlich |
 | `AZURE_OPENAI_API_KEY` | – | Azure-API-Key; bei `azure` erforderlich |
+| `MAX_LANGUAGES` | `4` | Gleichzeitige Zielsprachen (1–17) |
+| `MAX_BROADCAST_SECONDS` | `3600` | Dauer pro Übertragung in Sekunden; `0` ohne App-Zeitlimit |
 | `SPEAKER_PIN` | `0000` | Vierstellige PIN zum Erstellen einer Session |
 | `TRANSLATE_TRANSCRIPTION_MODEL` | `gpt-realtime-whisper` | Transkription der Originalsprache; `off` zum Abschalten |
 | `TRANSLATE_NOISE_REDUCTION` | `near_field` | Rauschunterdrückung: `near_field`, `far_field` oder `off` |
@@ -107,10 +109,13 @@ Weitere Hinweise stehen in der [Bedienungsanleitung](docs/usage.md).
 
 ## Limits
 
+Die App verwendet folgende Standardgrenzen. Sprachzahl und Übertragungsdauer lassen sich in `.env` ändern;
+eigene Grenzen des Providers gelten zusätzlich.
+
 - 1 aktiver Sprecher
 - 31 Zuhörer
-- 4 Zielsprachen gleichzeitig
-- 10 Minuten pro Session
+- Standardmäßig 4 Zielsprachen gleichzeitig (`MAX_LANGUAGES`)
+- Standardmäßig eine Stunde pro Übertragung (`MAX_BROADCAST_SECONDS`); mit `0` ohne App-Zeitlimit
 - Sessions nur im RAM; ein Neustart beendet alle Sessions
 
 SONA ist für ein **vertrauenswürdiges lokales Netzwerk** vorgesehen.
