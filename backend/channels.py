@@ -15,7 +15,7 @@ def upstream_message(event):
 
 
 class TranslationChannel:
-    def __init__(self, language, url, key, publish, noise_reduction=None):
+    def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None):
         self.language = language
         self.url = url
         self.key = key
@@ -23,6 +23,8 @@ class TranslationChannel:
         # 'near_field' or 'far_field'; None omits audio.input entirely, which the
         # LiteLLM translation route currently requires (see README).
         self.noise_reduction = noise_reduction
+        # Model name for audio.input.transcription; only one channel per room carries the original text.
+        self.transcribe = transcribe
         self.queue = asyncio.Queue(maxsize=100)
         self.status = 'connecting'
         self.spoke = False
@@ -53,8 +55,13 @@ class TranslationChannel:
             async with websockets.connect(self.url, additional_headers={'Authorization': 'Bearer ' + self.key},
                                           proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as ws:
                 session = {'audio': {'output': {'language': self.language}}}
+                audio_input = {}
                 if self.noise_reduction:
-                    session['audio']['input'] = {'noise_reduction': {'type': self.noise_reduction}}
+                    audio_input['noise_reduction'] = {'type': self.noise_reduction}
+                if self.transcribe:
+                    audio_input['transcription'] = {'model': self.transcribe}
+                if audio_input:
+                    session['audio']['input'] = audio_input
                 await ws.send(json.dumps({'type': 'session.update', 'session': session}))
                 async with asyncio.timeout(20):
                     while True:
@@ -74,6 +81,8 @@ class TranslationChannel:
                             await self.publish({'type': 'audio', 'delta': event['delta']})
                         elif kind == 'session.output_transcript.delta':
                             await self.publish({'type': 'translation_delta', 'delta': event['delta']})
+                        elif kind == 'session.input_transcript.delta':
+                            await self.publish({'type': 'original_delta', 'delta': event['delta']})
                         elif kind == 'error':
                             raise RuntimeError('Translation stream failed: ' + upstream_message(event))
                     raise RuntimeError('Translation stream closed')

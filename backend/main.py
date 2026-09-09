@@ -14,7 +14,6 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from transcription import stream_captions
 from channels import TranslationChannel
 
 log = logging.getLogger(__name__)
@@ -25,9 +24,10 @@ MAX_LANGUAGES = 4
 LANGUAGES = {'de', 'en', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'uk', 'ru', 'ar', 'hi', 'id', 'vi', 'ja', 'ko', 'zh'}
 URL = os.getenv('TRANSLATE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime/translations?model=azure-live-translate')
 KEY = os.getenv('TRANSLATE_KEY', '')
-TRANSCRIBE_URL = os.getenv('TRANSCRIBE_URL', 'wss://litellm-test.simplicity.ag/v1/realtime?model=azure-live-transcribe&intent=transcription')
-TRANSCRIBE_MODEL = os.getenv('TRANSCRIBE_MODEL', 'azure-live-transcribe')
-TRANSCRIBE_KEY = os.getenv('TRANSCRIBE_KEY', '')
+# Original-language captions come from audio.input.transcription on the room language's channel; 'off' disables them.
+TRANSCRIPTION_MODEL = os.getenv('TRANSLATE_TRANSCRIPTION_MODEL', 'gpt-realtime-whisper').strip()
+if TRANSCRIPTION_MODEL.lower() == 'off':
+    TRANSCRIPTION_MODEL = ''
 
 NOISE_REDUCTION_MODES = ('off', 'near_field', 'far_field')
 
@@ -39,7 +39,6 @@ def noise_reduction_setting(name, default):
     return None if value == 'off' else value
 
 TRANSLATE_NOISE_REDUCTION = noise_reduction_setting('TRANSLATE_NOISE_REDUCTION', 'near_field')
-TRANSCRIBE_NOISE_REDUCTION = noise_reduction_setting('TRANSCRIBE_NOISE_REDUCTION', 'near_field')
 
 def chosen_noise_reduction(value):
     """The speaker's per-session choice; anything unknown means the configured default."""
@@ -79,8 +78,8 @@ app = FastAPI()
 
 @app.get('/api/health')
 def health():
-    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIBE_KEY else 'unavailable',
-            'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off', 'transcription': TRANSCRIBE_NOISE_REDUCTION or 'off'}}
+    return {'ok': True, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
+            'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'}}
 
 class NewRoom(BaseModel):
     language: str = 'en'
@@ -172,17 +171,6 @@ async def send_peer(peer):
 async def counts(room):
     await broadcast(room, {'type': 'listeners', 'count': max(0, len(room.peers) - int(room.active))})
 
-async def transcribe_audio(room, queue):
-    async def publish(text):
-        room.original = text
-        await broadcast(room, {'type': 'original', 'text': text})
-    try:
-        await stream_captions(queue, TRANSCRIBE_URL, TRANSCRIBE_KEY, TRANSCRIBE_MODEL,
-                              room.source, room.original, publish, TRANSCRIBE_NOISE_REDUCTION)
-    except Exception as exc:
-        log.warning('Captions failed: %s', exc)
-        await broadcast(room, {'type': 'notice', 'message': 'Cloud-Spracherkennung ist momentan nicht verfügbar. Die Übersetzung läuft weiter.'})
-
 def channel_status(room, language):
     channel = room.channels.get(language)
     return channel.status if channel else ('ended' if room.draining else 'waiting')
@@ -192,6 +180,11 @@ def ensure_channel(room, language):
     if not room.active or room.draining or language in room.channels:
         return
     async def publish(event):
+        if event['type'] == 'original_delta':
+            # Deltas already carry their spacing; the text goes to the speaker and every listener.
+            room.original = (room.original + event['delta'])[-20000:]
+            await broadcast(room, {'type': 'original', 'text': room.original})
+            return
         if event['type'] == 'translation_delta':
             text = room.translations.get(language, '')
             if not channel.spoke and text and not text[-1].isspace() and not event['delta'][:1].isspace():
@@ -200,7 +193,8 @@ def ensure_channel(room, language):
             room.translations[language] = (text + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
-    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=room_noise_reduction(room))
+    channel = TranslationChannel(language, URL, KEY, publish, noise_reduction=room_noise_reduction(room),
+                                 transcribe=TRANSCRIPTION_MODEL if language == room.language else None)
     room.channels[language] = channel
     channel.start()
 
@@ -232,11 +226,11 @@ class Handover:
         self.last_tail = asyncio.get_running_loop().time()
         forward_old, self.forward_new = old.publish, new.publish
         async def tail(event):
-            if event['type'] in ('audio', 'translation_delta'):
+            if event['type'] in ('audio', 'translation_delta', 'original_delta'):
                 self.last_tail = asyncio.get_running_loop().time()
                 await forward_old(event)
         async def gated(event):
-            if self.released or event['type'] not in ('audio', 'translation_delta'):
+            if self.released or event['type'] not in ('audio', 'translation_delta', 'original_delta'):
                 await self.forward_new(event)
             else:
                 self.buffer.append(event)
@@ -265,6 +259,8 @@ class Handover:
 async def prune_channels(room):
     # Caller holds room.lock. Keep the slot occupied until its upstream is closed.
     wanted = {p.language for p in room.peers if p.language}
+    if room.active and not room.draining:
+        wanted.add(room.language)  # carries the original-language captions while speaking
     for language in list(room.channels):
         if language not in wanted:
             await room.channels[language].close()
@@ -276,7 +272,7 @@ async def subscribe(room, peer, language, subscription):
         raise ValueError('Invalid subscription')
     async with room.lock:
         wanted = {p.language for p in room.peers if p is not peer and p.language}
-        if len(wanted | {language}) > MAX_LANGUAGES:
+        if len(wanted | {language, room.language}) > MAX_LANGUAGES:
             await peer.queue.put({'type': 'subscription_rejected', 'subscription': subscription,
                                   'language': peer.language, 'active_subscription': peer.subscription,
                                   'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language), 'message': 'Es sind bereits vier Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
@@ -297,11 +293,9 @@ async def subscribe(room, peer, language, subscription):
 
 
 async def translation(room, ws, speaker):
-    audio_queue = asyncio.Queue(maxsize=100)
-    transcriber = asyncio.create_task(transcribe_audio(room, audio_queue))
     async with room.lock:
         room.draining = False
-        for language in {p.language for p in room.peers if p.language}:
+        for language in {p.language for p in room.peers if p.language} | {room.language}:
             ensure_channel(room, language)
     await speaker.queue.put({'type': 'status', 'status': 'live'})
     swap = None  # frames waited for a pause since the speaker changed a setting
@@ -323,12 +317,6 @@ async def translation(room, ws, speaker):
                         if quiet >= 5 or swap >= 50:
                             swap = None
                             await swap_channels(room)
-                    if not transcriber.done():
-                        try:
-                            audio_queue.put_nowait(pcm)
-                        except asyncio.QueueFull:
-                            transcriber.cancel()
-                            await speaker.queue.put({'type': 'notice', 'message': 'Cloud-Spracherkennung kommt nicht nach. Bitte die Sitzung erneut starten.'})
                     for language, channel in list(room.channels.items()):
                         if channel.feed(pcm) is False:
                             await broadcast(room, {'type': 'status', 'status': 'error'}, language)
@@ -349,22 +337,14 @@ async def translation(room, ws, speaker):
         async with room.lock:
             room.draining = True
         try:
-            if not transcriber.done():
-                try:
-                    audio_queue.put_nowait(None)
-                except asyncio.QueueFull:
-                    transcriber.cancel()
             for channel in list(room.channels.values()):
                 channel.feed(None)
-            tasks = [transcriber] + [c.task for c in room.channels.values()]
             try:
                 async with asyncio.timeout(22):
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*[c.task for c in room.channels.values()], return_exceptions=True)
             except TimeoutError:
                 pass
         finally:
-            transcriber.cancel()
-            await asyncio.gather(transcriber, return_exceptions=True)
             async with room.lock:
                 for channel in room.channels.values():
                     await channel.close()
