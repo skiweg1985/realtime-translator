@@ -69,10 +69,10 @@ App-Logs, die URL, den Modell- beziehungsweise Deployment-Namen und die Berechti
 
 ## Untertitel und Rauschunterdrückung
 
-Der Provider muss bis zu vier gleichzeitige Übersetzungsverbindungen zulassen.
+Der Provider muss die unter `MAX_LANGUAGES` konfigurierte Zahl gleichzeitiger Übersetzungsverbindungen zulassen.
 Originalsprachliche Untertitel werden über `audio.input.transcription` auf dem Kanal der
 Session-Zielsprache angefordert. Dieser Kanal bleibt während der Übertragung geöffnet und zählt
-zum Limit von vier Zielsprachen.
+zum konfigurierten Sprachlimit.
 
 `TRANSLATE_TRANSCRIPTION_MODEL` muss ein vom Provider unterstütztes Transkriptionsmodell benennen.
 Unterstützt er diese Funktion nicht, setze `TRANSLATE_TRANSCRIPTION_MODEL=off`.
@@ -86,3 +86,27 @@ Der Sprecher kann diese Einstellung pro Session ändern.
 Ohne die Variable gilt `0000`; ein leerer oder ungültiger Wert verhindert den Start.
 Die PIN wird serverseitig geprüft und nicht in geteilte Links aufgenommen.
 Nach einer Änderung muss der App-Container neu erstellt werden.
+
+## Sprachzahl und Übertragungsdauer
+
+Beide Grenzen werden serverseitig in `.env` konfiguriert. Zum Beispiel für acht Zielsprachen
+und eine Stunde pro Übertragung:
+
+```env
+MAX_LANGUAGES=8
+MAX_BROADCAST_SECONDS=3600
+```
+
+`MAX_LANGUAGES` erlaubt ganze Zahlen von 1 bis 17 und ist standardmäßig 4.
+Die Standard-Zielsprache der Session belegt einen Platz. Weitere Zuhörer derselben Sprache
+benötigen keinen zusätzlichen Platz.
+
+`MAX_BROADCAST_SECONDS` ist eine nichtnegative ganze Zahl in Sekunden, standardmäßig 3600 (eine Stunde).
+Mit `0` läuft die Übertragung ohne Zeitlimit der App. Der Timer beginnt bei jedem Start oder
+Fortsetzen der Übertragung neu. Stummschalten pausiert ihn nicht. Bei Ablauf endet die
+Übertragung; die Session bleibt bestehen und der Sprecher kann erneut starten.
+
+Leere, negative oder ungültige Werte verhindern den App-Start. Nach Änderungen den App-Container
+neu erstellen. `/api/health` zeigt die wirksamen Werte unter `limits`.
+Längere Übertragungen und zusätzliche Sprachen erhöhen die API-Nutzung; Zeit- und Verbindungslimits
+des gewählten Providers gelten weiterhin.
