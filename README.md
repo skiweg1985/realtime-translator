@@ -2,6 +2,14 @@
 
 One speaker, many listeners: live translated audio and text in the browser. React/Vite frontend, FastAPI backend and HAProxy for HTTPS, all in one Compose stack. Speaker access by PIN, no user accounts, no database, no recording.
 
+## Home screen
+
+Choose **Sprechen** to prepare a speaker session or **Zuhören** to join one. The settings button in the top right changes the interface language and appearance.
+
+| Light | Dark |
+| --- | --- |
+| <a href="docs/images/home-light.png"><img src="docs/images/home-light.png" width="280" alt="SONA home screen in light mode with Speak and Listen choices"></a> | <a href="docs/images/home-dark.png"><img src="docs/images/home-dark.png" width="280" alt="SONA home screen in dark mode with Speak and Listen choices"></a> |
+
 ## Setup
 
 ```sh
@@ -41,9 +49,27 @@ On desktop, import `certs/ca.crt` instead. The server certificate is valid 90 da
 
 ## Use
 
-**Speaker:** tap **Sprechen**, choose the languages in the `Deutsch → English` line, enter the speaker PIN, then tap **Session vorbereiten**. Share the session code, QR code or link from the share dialog. Listeners can already join and wait. Only **Sprechen starten** requests microphone access and starts translation. The languages are fixed when the session is created. Pause, resume and reload in the same browser tab keep the speaker access without asking for the PIN again. **Mikro aus** mutes the microphone; **Sitzung beenden** closes the session for everyone, even before the first broadcast. Denying microphone access preserves the session for another attempt.
+The screenshots show the German interface. The code and localhost link are examples from a session that has been ended; use the code or link from your own session.
 
-**Listener:** tap **Zuhören**, enter the code, scan the QR code or open the link, then **Zuhören starten**. The dock switches between **Audio + Text**, **Audio** and **Text**; text mode adds three sizes and a focus view. The language can be changed at any time.
+<!-- Screenshots: German UI, 390 px wide; home in both themes, guide in light. Refresh the affected images together when these flows change, and end the capture session afterward. -->
+
+### Speaker
+
+| 1. Prepare | 2. Invite listeners | 3. Start speaking |
+| --- | --- | --- |
+| <a href="docs/images/speaker-prepare.png"><img src="docs/images/speaker-prepare.png" width="240" alt="Session preparation dialog with language selection and a masked speaker PIN"></a> | <a href="docs/images/speaker-share.png"><img src="docs/images/speaker-share.png" width="240" alt="Share dialog with the listener code, QR code and session link"></a> | <a href="docs/images/speaker-ready.png"><img src="docs/images/speaker-ready.png" width="240" alt="Prepared speaker session with the Start speaking button at the bottom"></a> |
+| Tap **Sprechen** on the home screen. Choose the languages, enter the speaker PIN, then tap **Session vorbereiten**. | Share the code, QR code or link. Listeners can join before you start speaking. | Close the share dialog, tap **Sprechen starten**, and allow microphone access. This starts the translation. |
+
+The languages are fixed when the session is created. **Mikro aus** mutes the microphone; **Sprechen beenden** pauses the broadcast and **Weiter sprechen** resumes it. **Sitzung beenden** ends the session for everyone, including before the first broadcast (the exit icon beside the start button). Reloading in the same tab retains speaker access. If microphone access is denied, the session remains available for another attempt.
+
+### Listener
+
+| 1. Join | 2. Choose your language and mode | 3. Wait for the speaker |
+| --- | --- | --- |
+| <a href="docs/images/listener-join.png"><img src="docs/images/listener-join.png" width="240" alt="Join dialog with a session code field, QR scanner and link entry"></a> | <a href="docs/images/listener-ready.png"><img src="docs/images/listener-ready.png" width="240" alt="Listener screen with target language, Audio and Text modes, and Start listening button"></a> | <a href="docs/images/listener-waiting.png"><img src="docs/images/listener-waiting.png" width="240" alt="Connected listener waiting for the speaker, with sound and leave controls"></a> |
+| Tap **Zuhören** and enter the speaker's session code or scan the QR code. Opening the shared link also takes you to the session. The speaker PIN is not needed. | Tap **Ich höre** to choose a language. Select **Audio + Text**, **Audio** or **Text**, then **Zuhören starten** (or **Mitlesen starten** for text only). | **Wartet** means you are connected. Translation starts when the speaker begins; no need to join again. **Zuhören beenden** leaves the session. |
+
+You can change the listening language or mode at any time. **Text** mode also offers text sizes and a focus view.
 
 ## How it works
 
