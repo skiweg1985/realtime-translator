@@ -30,9 +30,10 @@ beziehungsweise **Mitlesen starten**.
 Du musst nicht erneut beitreten, wenn die Übertragung beginnt.
 **Zuhören beenden** verlässt die Session.
 
-**Unterbrochen** heißt, dass die Verbindung zum Übersetzungsdienst abgerissen ist. Kurze
-Störungen fängt der Server selbst ab. Bleibt der Hinweis stehen, hilft **Erneut versuchen**
-oder eine andere Zielsprache. Der Sprecher sieht denselben Ausfall auf seiner Seite.
+**Unterbrochen** heißt, dass die Verbindung zum Übersetzungsdienst abgerissen ist. Der Server
+versucht es weiter, bis zu einmal pro Minute, und sobald der Dienst antwortet, geht es ohne dein
+Zutun weiter. **Erneut versuchen** zieht den nächsten Versuch vor. Der Sprecher sieht denselben
+Ausfall auf seiner Seite und kann ihn dort ebenfalls anstoßen.
 
 Sprache und Modus lassen sich jederzeit ändern. Im Textmodus stehen zusätzlich Textgrößen und
 eine Fokusansicht zur Verfügung.

@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from channels import TranslationChannel
+from channels import TranslationChannel, probe
 from provider import provider_settings
 
 log = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ def integer_setting(name, default, minimum, maximum=None):
 
 
 MAX_LANGUAGES = integer_setting('MAX_LANGUAGES', 4, 1, len(LANGUAGES))
+# A listener may retry a failed language for everyone, but not faster than this.
+RETRY_COOLDOWN = 10
 MAX_BROADCAST_SECONDS = integer_setting('MAX_BROADCAST_SECONDS', 3600, 0)
 
 PROVIDER = provider_settings()
@@ -94,6 +96,8 @@ class Room:
     code: str = ''
     noise_reduction: str | None = None
     retiring: list = field(default_factory=list)
+    # When each language was last rebuilt on a listener's request.
+    retried: dict = field(default_factory=dict)
     # Channel summary last sent to the speaker, so only a change is reported.
     reported: dict = field(default_factory=dict)
 
@@ -101,9 +105,42 @@ rooms: dict[str, Room] = {}
 
 app = FastAPI()
 
+# How long a reachability result counts as current, and how long a single check may take.
+PROBE_INTERVAL = 30
+PROBE_TIMEOUT = 5
+# 'unknown' until the first check has answered; every browser tab reads the same result.
+reachability = {'state': 'unknown', 'checked': 0.0, 'task': None}
+
+
+async def run_probe():
+    try:
+        await probe(URL, PROVIDER.headers(), PROBE_TIMEOUT)
+        reachability['state'] = 'ok'
+    except Exception as exc:
+        # The detail belongs in the log, never in a response: it can name the provider and the model.
+        log.warning('Translation provider unreachable: %s', exc)
+        reachability['state'] = 'unreachable'
+
+
+def check_reachability():
+    """Answer from the last check and start a new one if it is due.
+
+    The check itself must never delay this endpoint, because a hanging provider is exactly the
+    case it exists for. It is also skipped while someone is broadcasting: the open channels
+    already say more than a probe would, and the provider need not carry an extra session."""
+    now = time.monotonic()
+    task = reachability['task']
+    due = now - reachability['checked'] >= PROBE_INTERVAL
+    if KEY and due and (task is None or task.done()) and not any(room.active for room in rooms.values()):
+        reachability['checked'] = now
+        reachability['task'] = asyncio.create_task(run_probe())
+    return reachability['state'] if KEY else 'unconfigured'
+
+
 @app.get('/api/health')
-def health():
-    return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
+async def health():
+    return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY),
+            'translation_reachable': check_reachability(), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
             'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'},
             'limits': {'max_languages': MAX_LANGUAGES, 'max_broadcast_seconds': MAX_BROADCAST_SECONDS}}
 
@@ -202,7 +239,7 @@ async def counts(room):
 
 async def report_channels(room):
     """Language events are scoped to their listeners, so the speaker needs its own summary."""
-    failed = sorted(language for language, channel in room.channels.items() if channel.status == 'error')
+    failed = sorted(language for language, channel in room.channels.items() if channel.failed)
     live = sum(channel.status == 'live' for channel in room.channels.values())
     report = {'type': 'channels', 'failed': failed, 'live': live, 'total': len(room.channels)}
     if report == room.reported:
@@ -212,6 +249,24 @@ async def report_channels(room):
         if peer.speaker:
             with contextlib.suppress(asyncio.QueueFull):
                 peer.queue.put_nowait(dict(report))
+
+def retry_channel(room, language):
+    """Bring the next attempt forward for one language, if it is failing and the cooldown allows.
+
+    The channel keeps retrying on its own, so this only shortens the wait. The cooldown keeps a
+    single listener from opening upstream connections at will by tapping the button, and it is
+    shared: every listener of a language draws from the same budget."""
+    channel = room.channels.get(language)
+    if not channel or not channel.failed or time.monotonic() - room.retried.get(language, 0) < RETRY_COOLDOWN:
+        return False
+    room.retried[language] = time.monotonic()
+    if channel.task.done():
+        # Nothing is retrying any more, so the slot has to be rebuilt.
+        room.channels.pop(language).task.cancel()
+    else:
+        channel.retry_now()
+    return True
+
 
 def channel_status(room, language):
     channel = room.channels.get(language)
@@ -327,11 +382,8 @@ async def subscribe(room, peer, language, subscription):
         peer.language = language
         peer.subscription = subscription
         await prune_channels(room)
-        # Explicit resubscription retries a failed channel for all its listeners.
-        channel = room.channels.get(language)
-        if channel and channel.task.done():
-            await channel.close()
-            del room.channels[language]
+        # Explicit resubscription retries a failed language for all its listeners.
+        retry_channel(room, language)
         ensure_channel(room, language)
         await report_channels(room)
         await peer.queue.put({'type': 'snapshot', 'language': language, 'subscription': subscription,
@@ -344,6 +396,8 @@ async def translation(room, ws, speaker):
     async with room.lock:
         room.draining = False
         room.reported = {}
+        # Starting a broadcast is the speaker's own retry and never waits for a listener's cooldown.
+        room.retried.clear()
         for language in {p.language for p in room.peers if p.language} | {room.language}:
             ensure_channel(room, language)
         # Report before the first upstream answers: a slow handshake must be visible from the start.
@@ -378,6 +432,12 @@ async def translation(room, ws, speaker):
                     break
                 elif message.get('text'):
                     update = json.loads(message['text'])
+                    if update.get('type') == 'retry':
+                        # The speaker owns the session and may hurry every failing language along.
+                        async with room.lock:
+                            for language in list(room.channels):
+                                retry_channel(room, language)
+                        continue
                     if update.get('type') != 'settings':
                         raise ValueError('Invalid message')
                     room.noise_reduction = chosen_noise_reduction(update.get('noise_reduction'))

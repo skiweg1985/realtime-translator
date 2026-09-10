@@ -593,6 +593,13 @@ button.lang:active {
   min-width: 0;
   padding-top: 1px;
 }
+/* Eine Aktion in der Meldung selbst, statt einer weiteren Zeile darunter. */
+.alert-action {
+  flex: none;
+  margin: -6px 0;
+  font-weight: 600;
+  text-decoration: underline;
+}
 .dismiss {
   flex: none;
   width: 44px;

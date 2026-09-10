@@ -31,9 +31,21 @@ docker compose logs --tail=30 app
 ```
 
 `GET /api/health` zeigt den Provider, das Vorhandensein seines Keys, die Konfiguration der
-Transkription und die Rauschunterdrückung. Der Health Check prüft keine Verbindung zum Provider.
-Wie sich Zugangsdaten und Modellzugriff prüfen lassen, steht unter
-[Provider konfigurieren](configuration.md#übernehmen-und-prüfen).
+Transkription und die Rauschunterdrückung. Wie sich Zugangsdaten und Modellzugriff von Hand prüfen
+lassen, steht unter [Provider konfigurieren](configuration.md#übernehmen-und-prüfen).
+
+Dazu kommt `translation_reachable` mit `unknown`, `ok`, `unreachable` oder `unconfigured`. Dahinter
+steht ein echter Handshake zum Provider, der eine Übersetzungssitzung öffnet und sofort wieder
+schließt; er prüft also Route, Key und Modell, sendet aber kein Audio. Das Ergebnis gilt dreißig
+Sekunden und wird von allen Abrufen geteilt, egal wie viele Browser gerade pollen. Der Handshake
+läuft im Hintergrund und hat fünf Sekunden Zeit, `/api/health` antwortet währenddessen sofort mit
+dem letzten bekannten Wert. Der erste Abruf nach dem Start liefert deshalb `unknown`. Solange
+jemand überträgt, wird nicht geprüft: die offenen Kanäle sagen mehr als ein Handshake, und der
+Provider bekommt keine zusätzliche Sitzung.
+
+Die Oberfläche zeigt `unreachable` im Dialog **Session vorbereiten** und in der Sprecheransicht vor
+dem Start. Beides ist ein Hinweis, keine Sperre: eine Session lässt sich weiterhin anlegen und
+starten, denn ein Fehlschlag der Prüfung darf die Nutzung nicht verhindern.
 
 ## Sessions und Zugriff
 
@@ -51,21 +63,31 @@ im Prozessspeicher liegen. Zusätzliche Worker würden diesen Zustand nicht teil
 ## Wenn der Übersetzungsdienst ausfällt
 
 Jede Zielsprache hat eine eigene Verbindung zum Provider. Bricht eine davon ab oder kommt sie
-nicht zustande, verbindet der Server sie zweimal neu, nach einer und nach drei Sekunden. Die
-Zuhörer dieser Sprache sehen währenddessen **Verbindet**, der bisherige Text bleibt stehen.
-In den Logs steht dazu `Translation channel <Sprache> reconnects in <n>s`.
+nicht zustande, versucht der Server es sofort noch zweimal, nach einer und nach drei Sekunden. Die
+Zuhörer dieser Sprache sehen währenddessen **Verbindet**, der bisherige Text bleibt stehen. In den
+Logs steht dazu `Translation channel <Sprache> retries in <n>s`.
 
 Antwortet der Provider gar nicht, statt die Verbindung abzulehnen, läuft jeder Versuch in einen
-Handshake-Timeout von acht Sekunden. Bis zur endgültigen Meldung vergehen dann knapp dreißig
-Sekunden. Damit der Sprecher nicht so lange im Unklaren bleibt, steht bei ihm schon nach drei
-Sekunden ohne laufenden Kanal, dass die Verbindung noch nicht steht und gerade nichts übersetzt
-wird.
+Handshake-Timeout von acht Sekunden. Bis zur Meldung vergehen dann knapp dreißig Sekunden. Damit
+der Sprecher nicht so lange im Unklaren bleibt, steht bei ihm schon nach drei Sekunden ohne
+laufenden Kanal, dass die Verbindung noch nicht steht und gerade nichts übersetzt wird.
 
-Erst wenn auch der dritte Versuch scheitert, gibt der Server die Sprache auf und protokolliert
-`Translation channel <Sprache> failed`. Die betroffenen Zuhörer sehen dann **Übersetzung
-unterbrochen** und darunter die Schaltfläche **Erneut versuchen**, die sofort einen neuen
-Versuch auslöst. Der Sprecher bekommt in derselben Lage einen Hinweis, welche Zielsprachen gerade
-nicht übersetzt werden; fällt jede Sprache aus, steht dort, dass gar nicht übersetzt wird. Der
-Hinweis verschwindet von selbst, sobald die Sprachen wieder laufen. Die Übertragung läuft die
-ganze Zeit weiter, eine Session muss deshalb nicht neu gestartet werden.
+Scheitert auch der dritte Versuch, meldet der Server die Sprache als ausgefallen und protokolliert
+`Translation channel <Sprache> failed`. Aufgegeben wird sie damit nicht: der Kanal versucht es
+weiter, nach fünfzehn, nach dreißig und danach alle sechzig Sekunden, solange die Übertragung
+läuft. Kommt der Provider zurück, geht die Sprache von selbst wieder live und alle Meldungen
+verschwinden. Ein Ausfall von einigen Minuten kostet also nicht die restliche Session, und der
+Provider bekommt dabei höchstens einen Versuch pro Minute und Sprache, unabhängig davon, wie viele
+Zuhörer warten.
+
+Wer nicht warten will, kann den nächsten Versuch vorziehen. Zuhörer haben dafür unter **Übersetzung
+unterbrochen** die Schaltfläche **Erneut versuchen**, der Sprecher in seiner Meldung **Jetzt
+versuchen**. Beide wecken denselben Kanal, ohne einen zweiten zu öffnen, und beide teilen sich eine
+Sperre von zehn Sekunden je Sprache. Ein einzelner Zuhörer kann also durch wiederholtes Tippen
+keine zusätzliche Last auf dem Provider erzeugen; nur der Start einer Übertragung setzt die Sperre
+zurück, weil das der eigene Neuanlauf des Sprechers ist.
+
+Ein Neuversuch ist keine Entwarnung: die Meldung beim Sprecher hängt daran, ob eine Sprache
+tatsächlich übersetzt, nicht daran, ob gerade ein Versuch läuft. Sie verschwindet erst, wenn der
+Kanal wieder Text liefert.
 
