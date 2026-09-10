@@ -53,6 +53,7 @@ const languages: Record<string, string> = {
   zh: "中文",
 };
 const languageOptions = Object.entries(languages) as [string, string][];
+const noChannels = { failed: [] as string[], live: 0, total: 0 };
 type Status = "idle" | "connecting" | "live" | "waiting" | "ended" | "closed" | "draining" | "error";
 type Role = "home" | "speaker" | "listener";
 type Mode = "both" | "audio" | "text";
@@ -472,9 +473,10 @@ function App() {
     [notice, setNotice] = useState("");
   const [count, setCount] = useState(0),
     [copied, setCopied] = useState(false);
-  /* Sprecher: Zielsprachen, deren Übersetzung gerade ausgefallen ist. */
-  const [failed, setFailed] = useState<string[]>([]),
-    [channelCount, setChannelCount] = useState(0);
+  /* Sprecher: Zustand der Übersetzungskanäle. Ohne ihn bliebe ein Ausfall unbemerkt. */
+  const [channels, setChannels] = useState(noChannels);
+  /* Ein kurzer Verbindungsaufbau ist normal, erst ein anhaltender ist eine Meldung wert. */
+  const [connectSlow, setConnectSlow] = useState(false);
   const [muted, setMuted] = useState(false),
     [micMuted, setMicMuted] = useState(false),
     [elapsed, setElapsed] = useState(0);
@@ -573,6 +575,14 @@ function App() {
     const t = setInterval(() => setElapsed((x) => x + 1), 1000);
     return () => clearInterval(t);
   }, [status]);
+  useEffect(() => {
+    if (listener || !channels.total || channels.live || channels.failed.length) {
+      setConnectSlow(false);
+      return;
+    }
+    const timer = setTimeout(() => setConnectSlow(true), 3000);
+    return () => clearTimeout(timer);
+  }, [listener, channels]);
   useEffect(() => {
     const box = transcriptEnd.current?.parentElement;
     if (box && (text || original)) box.scrollTop = box.scrollHeight;
@@ -782,7 +792,7 @@ function App() {
   async function start() {
     setError("");
     setNotice("");
-    setFailed([]);
+    setChannels(noChannels);
     setElapsed(0);
     applyStatus("connecting");
     if (listener) {
@@ -895,16 +905,14 @@ function App() {
             };
           }
           if (event.status === "ended") stopMic();
-          if (!listener && ["ended", "closed"].includes(event.status)) setFailed([]);
+          if (!listener && ["ended", "closed"].includes(event.status)) setChannels(noChannels);
         }
         if (event.type === "translation") setText(event.text);
         if (event.type === "original") setOriginal(event.text);
         if (event.type === "listeners") setCount(event.count);
         if (event.type === "audio" && listener) play(event.delta);
-        if (event.type === "channels") {
-          setFailed(event.failed);
-          setChannelCount(event.total);
-        }
+        if (event.type === "channels")
+          setChannels({ failed: event.failed, live: event.live, total: event.total });
         if (event.type === "error") setError(describeEvent(event));
         if (event.type === "notice") setNotice(event.message);
       };
@@ -1104,18 +1112,22 @@ function App() {
       <Settings2 size={22} />
     </button>
   );
-  /* Bleibt stehen, solange die Übersetzung ausgefallen ist, und verschwindet von selbst. */
-  const channelAlert =
-    !listener && failed.length > 0 ? (
-      <div className="alert" role="alert">
-        <AlertCircle size={18} aria-hidden="true" />
-        <span>
-          {failed.length >= channelCount
-            ? t("channelsAllFailed")
-            : t("channelsFailed", { langs: failed.map((code) => languages[code] || code).join(", ") })}
-        </span>
-      </div>
-    ) : null;
+  /* Bleibt stehen, solange die Übersetzung nicht läuft, und verschwindet von selbst. */
+  const channelState: [Key, string] | null = listener
+    ? null
+    : channels.failed.length >= channels.total && channels.total > 0
+      ? ["channelsAllFailed", ""]
+      : channels.failed.length > 0
+        ? ["channelsFailed", channels.failed.map((code) => languages[code] || code).join(", ")]
+        : connectSlow
+          ? ["channelsConnecting", ""]
+          : null;
+  const channelAlert = channelState ? (
+    <div className={channels.failed.length ? "alert" : "notice"} role={channels.failed.length ? "alert" : "status"}>
+      <AlertCircle size={18} aria-hidden="true" />
+      <span>{t(channelState[0], { langs: channelState[1] })}</span>
+    </div>
+  ) : null;
   const alerts = (
     <>
       {channelAlert}

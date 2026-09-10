@@ -55,6 +55,12 @@ nicht zustande, verbindet der Server sie zweimal neu, nach einer und nach drei S
 Zuhörer dieser Sprache sehen währenddessen **Verbindet**, der bisherige Text bleibt stehen.
 In den Logs steht dazu `Translation channel <Sprache> reconnects in <n>s`.
 
+Antwortet der Provider gar nicht, statt die Verbindung abzulehnen, läuft jeder Versuch in einen
+Handshake-Timeout von acht Sekunden. Bis zur endgültigen Meldung vergehen dann knapp dreißig
+Sekunden. Damit der Sprecher nicht so lange im Unklaren bleibt, steht bei ihm schon nach drei
+Sekunden ohne laufenden Kanal, dass die Verbindung noch nicht steht und gerade nichts übersetzt
+wird.
+
 Erst wenn auch der dritte Versuch scheitert, gibt der Server die Sprache auf und protokolliert
 `Translation channel <Sprache> failed`. Die betroffenen Zuhörer sehen dann **Übersetzung
 unterbrochen** und darunter die Schaltfläche **Erneut versuchen**, die sofort einen neuen

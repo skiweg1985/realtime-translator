@@ -11,6 +11,9 @@ log = logging.getLogger(__name__)
 
 # A dropped upstream is usually short-lived, so try twice more before giving up on the language.
 RETRY_DELAYS = (1, 3)
+# A realtime service that needs longer than this for the handshake is unusable anyway, and every
+# second here is spent three times over before the speaker learns that nothing is being translated.
+OPEN_TIMEOUT = 8
 
 
 def upstream_message(event):
@@ -74,7 +77,7 @@ class TranslationChannel:
                 failure = exc
             if delay is None or self.finishing:
                 break
-            log.info('Translation channel %s reconnects in %ss: %s', self.language, delay, failure)
+            log.warning('Translation channel %s reconnects in %ss: %s', self.language, delay, failure)
             self.status = 'connecting'
             # The reconnected upstream starts a new sentence after the text so far.
             self.spoke = False
@@ -88,7 +91,7 @@ class TranslationChannel:
 
     async def session(self):
         async with websockets.connect(self.url, additional_headers=self.headers,
-                                      proxy=None, open_timeout=15, close_timeout=2, max_size=1048576) as ws:
+                                      proxy=None, open_timeout=OPEN_TIMEOUT, close_timeout=2, max_size=1048576) as ws:
             session = {'audio': {'output': {'language': self.language}}}
             audio_input = {}
             if self.noise_reduction:

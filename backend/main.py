@@ -94,8 +94,8 @@ class Room:
     code: str = ''
     noise_reduction: str | None = None
     retiring: list = field(default_factory=list)
-    # Languages last reported as failed, so the speaker only hears about a change.
-    reported: list = field(default_factory=list)
+    # Channel summary last sent to the speaker, so only a change is reported.
+    reported: dict = field(default_factory=dict)
 
 rooms: dict[str, Room] = {}
 
@@ -203,13 +203,15 @@ async def counts(room):
 async def report_channels(room):
     """Language events are scoped to their listeners, so the speaker needs its own summary."""
     failed = sorted(language for language, channel in room.channels.items() if channel.status == 'error')
-    if failed == room.reported:
+    live = sum(channel.status == 'live' for channel in room.channels.values())
+    report = {'type': 'channels', 'failed': failed, 'live': live, 'total': len(room.channels)}
+    if report == room.reported:
         return
-    room.reported = failed
+    room.reported = report
     for peer in list(room.peers):
         if peer.speaker:
             with contextlib.suppress(asyncio.QueueFull):
-                peer.queue.put_nowait({'type': 'channels', 'failed': failed, 'total': len(room.channels)})
+                peer.queue.put_nowait(dict(report))
 
 def channel_status(room, language):
     channel = room.channels.get(language)
@@ -341,9 +343,11 @@ async def subscribe(room, peer, language, subscription):
 async def translation(room, ws, speaker):
     async with room.lock:
         room.draining = False
-        room.reported = []
+        room.reported = {}
         for language in {p.language for p in room.peers if p.language} | {room.language}:
             ensure_channel(room, language)
+        # Report before the first upstream answers: a slow handshake must be visible from the start.
+        await report_channels(room)
     await speaker.queue.put({'type': 'status', 'status': 'live'})
     swap = None  # frames waited for a pause since the speaker changed a setting
     quiet = 0
