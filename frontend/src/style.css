@@ -411,6 +411,15 @@ button.lang:active {
 .standby.closed strong {
   font-size: calc(var(--text-lg) * 1.2);
 }
+/* Der Weg aus einem Ausfall gehört an den erklärenden Text, nicht ins Dock. */
+.standby-action {
+  flex: none;
+  margin-top: var(--space-3);
+  min-width: 200px;
+}
+.standby.centered .standby-action {
+  margin-inline: auto;
+}
 
 /* Textzeilen */
 .intro {

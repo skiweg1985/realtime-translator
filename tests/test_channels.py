@@ -53,6 +53,16 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         peer.queue.get_nowait()
         return peer
 
+    async def speaker(self):
+        peer = main.Peer(Socket(), speaker=True)
+        self.room.peers.add(peer)
+        return peer
+
+    async def fail(self, language):
+        channel = self.room.channels[language]
+        channel.status = 'error'
+        await channel.publish({'type': 'status', 'status': 'error'})
+
     async def test_same_language_shares_one_channel_and_events_are_scoped(self):
         a = await self.join('en');b = await self.join('en');c = await self.join('fr')
         self.assertEqual(len(self.room.channels), 2)
@@ -64,6 +74,27 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         await self.room.channels['fr'].publish({'type':'error','message':'French unavailable'})
         self.assertTrue(a.queue.empty())
         self.assertEqual(c.queue.get_nowait()['type'],'error')
+
+    async def test_speaker_learns_which_languages_stopped_translating(self):
+        speaker = await self.speaker()
+        await self.join('fr')
+        main.ensure_channel(self.room, 'en')  # carries the original captions while speaking
+        await self.fail('fr')
+        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': ['fr'], 'total': 2})
+        await self.fail('fr')  # an unchanged state stays quiet
+        self.assertTrue(speaker.queue.empty())
+        await self.fail('en')
+        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': ['en', 'fr'], 'total': 2})
+
+    async def test_a_retried_language_clears_the_speakers_warning(self):
+        speaker = await self.speaker()
+        listener = await self.join('fr')
+        await self.fail('fr')
+        self.assertEqual(speaker.queue.get_nowait()['failed'], ['fr'])
+        self.room.channels['fr'].task.cancel()
+        await asyncio.gather(self.room.channels['fr'].task, return_exceptions=True)
+        self.assertTrue(await main.subscribe(self.room, listener, 'fr', 2))
+        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': [], 'total': 1})
 
     async def test_four_languages_limit_preserves_existing_subscription(self):
         peers = [await self.join(l) for l in ['en','fr','es','it']]
@@ -187,8 +218,9 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.room.translations['en'],'Hello again')
 
 class SessionUpdate(unittest.IsolatedAsyncioTestCase):
-    async def open_channel(self, reply, **kwargs):
+    async def open_channel(self, reply, retries=(), **kwargs):
         import json
+        import channels as channels_module
         from channels import TranslationChannel
         sent = []
         published = []
@@ -201,10 +233,11 @@ class SessionUpdate(unittest.IsolatedAsyncioTestCase):
             async def __aenter__(self):return Socket()
             async def __aexit__(self, *args):pass
         async def publish(event):published.append(event)
-        with patch('channels.websockets.connect', return_value=Connection()) as connect:
+        with patch('channels.websockets.connect', return_value=Connection()) as connect, \
+             patch.object(channels_module, 'RETRY_DELAYS', retries):
             channel = TranslationChannel('fr', 'wss://test', 'test', publish, **kwargs)
             channel.start()
-            await asyncio.wait_for(channel.task, 2)
+            await asyncio.wait_for(channel.task, 5)
         self.assertEqual(connect.call_args.kwargs['additional_headers'],
                          kwargs.get('headers', {'Authorization': 'Bearer test'}))
         self.assertEqual(sent[0]['type'], 'session.update')
@@ -233,6 +266,29 @@ class SessionUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e['type'] for e in published], ['status', 'error'])
         self.assertNotIn('Additional', str(published))
 
+    async def test_lost_upstream_is_retried_before_the_language_is_given_up(self):
+        """A short provider outage must not cost the listener their language."""
+        rejection = {'type': 'error', 'error': {'type': 'server_error', 'message': 'upstream gone'}}
+        with self.assertLogs('channels', level='INFO'):
+            _, published = await self.open_channel(rejection, retries=(0, 0))
+        # Two reconnect attempts stay a 'connecting' status; only the last failure ends the language.
+        self.assertEqual([(e['type'], e.get('status')) for e in published],
+                         [('status', 'connecting'), ('status', 'connecting'), ('status', 'error'), ('error', None)])
+        self.assertEqual(published[-1]['code'], 'channel_unavailable')
+
+    async def test_a_draining_channel_is_not_reconnected(self):
+        import channels as channels_module
+        from channels import TranslationChannel
+        published = []
+        async def publish(event):published.append(event)
+        with patch('channels.websockets.connect', side_effect=OSError('no route')), \
+             patch.object(channels_module, 'RETRY_DELAYS', (0, 0)):
+            channel = TranslationChannel('fr', 'wss://test', 'test', publish)
+            channel.start()
+            channel.feed(None)
+            await asyncio.wait_for(channel.task, 5)
+        self.assertEqual([e['type'] for e in published], ['status', 'error'])
+
 
 class Backpressure(unittest.IsolatedAsyncioTestCase):
     async def test_slow_language_does_not_cancel_another_channel(self):
@@ -242,6 +298,7 @@ class Backpressure(unittest.IsolatedAsyncioTestCase):
         fast = TranslationChannel('fr','wss://test','test',publish)
         slow.task = asyncio.create_task(asyncio.Event().wait())
         fast.task = asyncio.create_task(asyncio.Event().wait())
+        slow.status = fast.status = 'live'
         try:
             for _ in range(100):self.assertTrue(slow.feed(bytes(4800)))
             self.assertFalse(slow.feed(bytes(4800)))
@@ -250,3 +307,44 @@ class Backpressure(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(slow.status,'error')
         finally:
             await slow.close();await fast.close()
+
+    async def test_a_reconnected_channel_starts_from_current_audio(self):
+        """Playing the backlog would leave every listener seconds behind the speaker."""
+        import json
+        import channels as channels_module
+        from channels import TranslationChannel
+        sent = []
+        class Socket:
+            async def send(self, raw):sent.append(json.loads(raw))
+            async def recv(self):return json.dumps({'type': 'session.updated'})
+            def __aiter__(self):return self
+            async def __anext__(self):
+                await asyncio.sleep(.2)
+                raise StopAsyncIteration
+        class Connection:
+            async def __aenter__(self):return Socket()
+            async def __aexit__(self, *args):pass
+        async def publish(event):pass
+        with patch('channels.websockets.connect', return_value=Connection()), \
+             patch.object(channels_module, 'RETRY_DELAYS', ()):
+            channel = TranslationChannel('fr', 'wss://test', 'test', publish)
+            channel.task = asyncio.create_task(asyncio.Event().wait())
+            for _ in range(20):channel.feed(bytes(4800))
+            channel.task.cancel()
+            await asyncio.gather(channel.task, return_exceptions=True)
+            channel.start()
+            await asyncio.wait_for(channel.task, 5)
+        self.assertEqual([e['type'] for e in sent], ['session.update'])
+
+    async def test_a_reconnecting_channel_drops_stale_audio_instead_of_giving_up(self):
+        from channels import TranslationChannel
+        async def publish(event):pass
+        channel = TranslationChannel('en','wss://test','test',publish)
+        channel.task = asyncio.create_task(asyncio.Event().wait())
+        try:
+            for _ in range(140):self.assertTrue(channel.feed(bytes(4800)))
+            self.assertEqual(channel.status,'connecting')
+            self.assertEqual(channel.queue.qsize(),100)
+            self.assertFalse(channel.task.done())
+        finally:
+            await channel.close()

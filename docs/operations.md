@@ -48,3 +48,18 @@ Zuhörercode getrennt. Zuhörer benötigen keine PIN.
 Der Server läuft mit genau einem Uvicorn-Worker, da Session-Zustand und Verteilung an Zuhörer
 im Prozessspeicher liegen. Zusätzliche Worker würden diesen Zustand nicht teilen.
 
+## Wenn der Übersetzungsdienst ausfällt
+
+Jede Zielsprache hat eine eigene Verbindung zum Provider. Bricht eine davon ab oder kommt sie
+nicht zustande, verbindet der Server sie zweimal neu, nach einer und nach drei Sekunden. Die
+Zuhörer dieser Sprache sehen währenddessen **Verbindet**, der bisherige Text bleibt stehen.
+In den Logs steht dazu `Translation channel <Sprache> reconnects in <n>s`.
+
+Erst wenn auch der dritte Versuch scheitert, gibt der Server die Sprache auf und protokolliert
+`Translation channel <Sprache> failed`. Die betroffenen Zuhörer sehen dann **Übersetzung
+unterbrochen** und darunter die Schaltfläche **Erneut versuchen**, die sofort einen neuen
+Versuch auslöst. Der Sprecher bekommt in derselben Lage einen Hinweis, welche Zielsprachen gerade
+nicht übersetzt werden; fällt jede Sprache aus, steht dort, dass gar nicht übersetzt wird. Der
+Hinweis verschwindet von selbst, sobald die Sprachen wieder laufen. Die Übertragung läuft die
+ganze Zeit weiter, eine Session muss deshalb nicht neu gestartet werden.
+

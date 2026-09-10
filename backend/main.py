@@ -73,6 +73,7 @@ def room_noise_reduction(room):
 @dataclass(eq=False)
 class Peer:
     ws: WebSocket
+    speaker: bool = False
     language: str | None = None
     subscription: int = 0
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=100))
@@ -93,6 +94,8 @@ class Room:
     code: str = ''
     noise_reduction: str | None = None
     retiring: list = field(default_factory=list)
+    # Languages last reported as failed, so the speaker only hears about a change.
+    reported: list = field(default_factory=list)
 
 rooms: dict[str, Room] = {}
 
@@ -197,6 +200,17 @@ async def send_peer(peer):
 async def counts(room):
     await broadcast(room, {'type': 'listeners', 'count': max(0, len(room.peers) - int(room.active))})
 
+async def report_channels(room):
+    """Language events are scoped to their listeners, so the speaker needs its own summary."""
+    failed = sorted(language for language, channel in room.channels.items() if channel.status == 'error')
+    if failed == room.reported:
+        return
+    room.reported = failed
+    for peer in list(room.peers):
+        if peer.speaker:
+            with contextlib.suppress(asyncio.QueueFull):
+                peer.queue.put_nowait({'type': 'channels', 'failed': failed, 'total': len(room.channels)})
+
 def channel_status(room, language):
     channel = room.channels.get(language)
     return channel.status if channel else ('ended' if room.draining else 'waiting')
@@ -219,6 +233,8 @@ def ensure_channel(room, language):
             room.translations[language] = (text + event['delta'])[-20000:]
             event = {'type': 'translation', 'text': room.translations[language]}
         await broadcast(room, event, language)
+        if event['type'] == 'status':
+            await report_channels(room)
     channel = TranslationChannel(language, URL, KEY, publish, headers=PROVIDER.headers(), noise_reduction=room_noise_reduction(room),
                                  transcribe=TRANSCRIPTION_MODEL if language == room.language else None)
     room.channels[language] = channel
@@ -291,6 +307,7 @@ async def prune_channels(room):
         if language not in wanted:
             await room.channels[language].close()
             del room.channels[language]
+    await report_channels(room)
 
 
 async def subscribe(room, peer, language, subscription):
@@ -301,7 +318,9 @@ async def subscribe(room, peer, language, subscription):
         if len(wanted | {language, room.language}) > MAX_LANGUAGES:
             await peer.queue.put({'type': 'subscription_rejected', 'subscription': subscription,
                                   'language': peer.language, 'active_subscription': peer.subscription,
-                                  'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language), 'message': f'Es sind bereits {MAX_LANGUAGES} Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
+                                  'text': room.translations.get(peer.language, ''), 'status': channel_status(room, peer.language),
+                                  'code': 'too_many_languages', 'max': MAX_LANGUAGES,
+                                  'message': f'Es sind bereits {MAX_LANGUAGES} Sprachen belegt. Bitte eine bereits verwendete Sprache wählen.'})
             return False
         peer.language = language
         peer.subscription = subscription
@@ -312,6 +331,7 @@ async def subscribe(room, peer, language, subscription):
             await channel.close()
             del room.channels[language]
         ensure_channel(room, language)
+        await report_channels(room)
         await peer.queue.put({'type': 'snapshot', 'language': language, 'subscription': subscription,
                               'text': room.translations.get(language, ''), 'original': room.original,
                               'status': channel_status(room, language)})
@@ -321,6 +341,7 @@ async def subscribe(room, peer, language, subscription):
 async def translation(room, ws, speaker):
     async with room.lock:
         room.draining = False
+        room.reported = []
         for language in {p.language for p in room.peers if p.language} | {room.language}:
             ensure_channel(room, language)
     await speaker.queue.put({'type': 'status', 'status': 'live'})
@@ -346,7 +367,9 @@ async def translation(room, ws, speaker):
                     for language, channel in list(room.channels.items()):
                         if channel.feed(pcm) is False:
                             await broadcast(room, {'type': 'status', 'status': 'error'}, language)
-                            await broadcast(room, {'type': 'error', 'message': 'Diese Übersetzung kommt nicht nach. Bitte erneut verbinden.'}, language)
+                            await broadcast(room, {'type': 'error', 'code': 'channel_slow',
+                                                   'message': 'Diese Übersetzung kommt nicht nach. Bitte erneut verbinden.'}, language)
+                            await report_channels(room)
                 elif message.get('text') == 'stop':
                     break
                 elif message.get('text'):
@@ -398,8 +421,10 @@ async def room_socket(ws: WebSocket, room_id: str):
         async with asyncio.timeout(10):
             auth = await ws.receive_json()
         owner = auth.get('role') == 'speaker'
+        peer.speaker = owner
         if owner and (not secrets.compare_digest(str(auth.get('owner', '')), room.owner) or any(r.active for r in rooms.values())):
-            await ws.send_json({'type': 'error', 'message': 'Es läuft bereits eine Sitzung oder der Sprecherzugang ist ungültig.'})
+            await ws.send_json({'type': 'error', 'code': 'speaker_rejected',
+                                'message': 'Es läuft bereits eine Sitzung oder der Sprecherzugang ist ungültig.'})
             return
         if owner:
             room.active = True
@@ -418,7 +443,8 @@ async def room_socket(ws: WebSocket, room_id: str):
             except WebSocketDisconnect:
                 pass
             except Exception:
-                await broadcast(room, {'type': 'error', 'message': 'Die Übersetzungsverbindung wurde beendet. Bitte nach einigen Sekunden erneut starten.'})
+                await broadcast(room, {'type': 'error', 'code': 'session_failed',
+                                       'message': 'Die Übersetzungsverbindung wurde beendet. Bitte nach einigen Sekunden erneut starten.'})
             finally:
                 room.active = False
                 await broadcast(room, {'type': 'status', 'status': 'ended'})
