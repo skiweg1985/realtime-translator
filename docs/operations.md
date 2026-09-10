@@ -31,9 +31,21 @@ docker compose logs --tail=30 app
 ```
 
 `GET /api/health` zeigt den Provider, das Vorhandensein seines Keys, die Konfiguration der
-Transkription und die Rauschunterdrückung. Der Health Check prüft keine Verbindung zum Provider.
-Wie sich Zugangsdaten und Modellzugriff prüfen lassen, steht unter
-[Provider konfigurieren](configuration.md#übernehmen-und-prüfen).
+Transkription und die Rauschunterdrückung. Wie sich Zugangsdaten und Modellzugriff von Hand prüfen
+lassen, steht unter [Provider konfigurieren](configuration.md#übernehmen-und-prüfen).
+
+Dazu kommt `translation_reachable` mit `unknown`, `ok`, `unreachable` oder `unconfigured`. Dahinter
+steht ein echter Handshake zum Provider, der eine Übersetzungssitzung öffnet und sofort wieder
+schließt; er prüft also Route, Key und Modell, sendet aber kein Audio. Das Ergebnis gilt dreißig
+Sekunden und wird von allen Abrufen geteilt, egal wie viele Browser gerade pollen. Der Handshake
+läuft im Hintergrund und hat fünf Sekunden Zeit, `/api/health` antwortet währenddessen sofort mit
+dem letzten bekannten Wert. Der erste Abruf nach dem Start liefert deshalb `unknown`. Solange
+jemand überträgt, wird nicht geprüft: die offenen Kanäle sagen mehr als ein Handshake, und der
+Provider bekommt keine zusätzliche Sitzung.
+
+Die Oberfläche zeigt `unreachable` im Dialog **Session vorbereiten** und in der Sprecheransicht vor
+dem Start. Beides ist ein Hinweis, keine Sperre: eine Session lässt sich weiterhin anlegen und
+starten, denn ein Fehlschlag der Prüfung darf die Nutzung nicht verhindern.
 
 ## Sessions und Zugriff
 

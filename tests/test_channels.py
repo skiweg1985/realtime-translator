@@ -210,7 +210,7 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'PROVIDER', provider), patch.object(main, 'URL', provider.url), patch.object(main, 'KEY', provider.key):
             await self.join('en')
             await self.join('fr')
-            health = main.health()
+            health = await main.health()
         for channel in self.room.channels.values():
             self.assertEqual(channel.url, provider.url)
             self.assertEqual(channel.headers, {'api-key': 'azure-test'})
@@ -237,6 +237,68 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*self.room.retiring, return_exceptions=True)
         await self.room.channels['en'].publish({'type':'translation_delta','delta':'again'})
         self.assertEqual(self.room.translations['en'],'Hello again')
+
+class Reachability(unittest.IsolatedAsyncioTestCase):
+    """/api/health tells the speaker whether the provider answers, before anyone starts talking."""
+    def setUp(self):
+        main.rooms.clear()
+        main.reachability.update({'state': 'unknown', 'checked': 0.0, 'task': None})
+        self.key = patch.object(main, 'KEY', 'test-only')
+        self.key.start()
+    def tearDown(self):
+        self.key.stop()
+        main.rooms.clear()
+
+    async def settle(self):
+        task = main.reachability['task']
+        if task:
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_health_answers_at_once_and_reports_the_finished_check(self):
+        slow = asyncio.Event()
+        async def hanging(*args, **kwargs):
+            await slow.wait()
+        with patch.object(main, 'probe', hanging):
+            self.assertEqual((await main.health())['translation_reachable'], 'unknown')
+            # Still 'unknown' while the probe runs: a hanging provider must not hold up the endpoint.
+            self.assertEqual((await main.health())['translation_reachable'], 'unknown')
+            slow.set()
+            await self.settle()
+        self.assertEqual((await main.health())['translation_reachable'], 'ok')
+
+    async def test_a_refused_provider_is_reported_without_leaking_its_detail(self):
+        async def refused(*args, **kwargs):
+            raise RuntimeError('Translation probe rejected: model gpt-secret-name not deployed')
+        with patch.object(main, 'probe', refused), self.assertLogs('main', level='WARNING') as logs:
+            await main.health()
+            await self.settle()
+            health = await main.health()
+        self.assertEqual(health['translation_reachable'], 'unreachable')
+        self.assertIn('gpt-secret-name', logs.output[0])
+        self.assertNotIn('gpt-secret-name', str(health))
+
+    async def test_repeated_calls_share_one_check_and_a_broadcast_suspends_it(self):
+        calls = []
+        async def counting(*args, **kwargs):
+            calls.append(1)
+        with patch.object(main, 'probe', counting):
+            for _ in range(5):
+                await main.health()
+                await self.settle()
+            self.assertEqual(len(calls), 1)  # the result stays current for PROBE_INTERVAL
+            main.reachability['checked'] = 0.0
+            main.rooms['r'] = main.Room(owner='o', language='en', source='de', active=True)
+            await main.health()
+            await self.settle()
+            self.assertEqual(len(calls), 1)  # the open channels say more than a probe would
+
+    async def test_a_missing_key_needs_no_check_at_all(self):
+        async def unexpected(*args, **kwargs):
+            raise AssertionError('probed without a key')
+        with patch.object(main, 'KEY', ''), patch.object(main, 'probe', unexpected):
+            self.assertEqual((await main.health())['translation_reachable'], 'unconfigured')
+        self.assertIsNone(main.reachability['task'])
+
 
 class SessionUpdate(unittest.IsolatedAsyncioTestCase):
     async def open_channel(self, reply, retries=(), **kwargs):
@@ -309,6 +371,31 @@ class SessionUpdate(unittest.IsolatedAsyncioTestCase):
             channel.feed(None)
             await asyncio.wait_for(channel.task, 5)
         self.assertEqual([e['type'] for e in published], ['status', 'error'])
+
+
+class Probe(unittest.IsolatedAsyncioTestCase):
+    async def run_probe(self, reply):
+        import json
+        from channels import probe
+        sent = []
+        class Socket:
+            async def send(self, raw):sent.append(json.loads(raw))
+            async def recv(self):return json.dumps(reply)
+        class Connection:
+            async def __aenter__(self):return Socket()
+            async def __aexit__(self, *args):pass
+        with patch('channels.websockets.connect', return_value=Connection()):
+            await asyncio.wait_for(probe('wss://test', {'Authorization': 'Bearer test'}, 2), 5)
+        return sent
+
+    async def test_the_probe_completes_a_handshake_and_sends_no_audio(self):
+        sent = await self.run_probe({'type': 'session.updated'})
+        self.assertEqual(sent, [{'type': 'session.update', 'session': {'audio': {'output': {'language': 'en'}}}}])
+
+    async def test_a_rejected_handshake_counts_as_unreachable(self):
+        rejection = {'type': 'error', 'error': {'type': 'invalid_request', 'message': 'model not found'}}
+        with self.assertRaisesRegex(RuntimeError, 'model not found'):
+            await self.run_probe(rejection)
 
 
 class Backpressure(unittest.IsolatedAsyncioTestCase):

@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from channels import TranslationChannel
+from channels import TranslationChannel, probe
 from provider import provider_settings
 
 log = logging.getLogger(__name__)
@@ -101,9 +101,42 @@ rooms: dict[str, Room] = {}
 
 app = FastAPI()
 
+# How long a reachability result counts as current, and how long a single check may take.
+PROBE_INTERVAL = 30
+PROBE_TIMEOUT = 5
+# 'unknown' until the first check has answered; every browser tab reads the same result.
+reachability = {'state': 'unknown', 'checked': 0.0, 'task': None}
+
+
+async def run_probe():
+    try:
+        await probe(URL, PROVIDER.headers(), PROBE_TIMEOUT)
+        reachability['state'] = 'ok'
+    except Exception as exc:
+        # The detail belongs in the log, never in a response: it can name the provider and the model.
+        log.warning('Translation provider unreachable: %s', exc)
+        reachability['state'] = 'unreachable'
+
+
+def check_reachability():
+    """Answer from the last check and start a new one if it is due.
+
+    The check itself must never delay this endpoint, because a hanging provider is exactly the
+    case it exists for. It is also skipped while someone is broadcasting: the open channels
+    already say more than a probe would, and the provider need not carry an extra session."""
+    now = time.monotonic()
+    task = reachability['task']
+    due = now - reachability['checked'] >= PROBE_INTERVAL
+    if KEY and due and (task is None or task.done()) and not any(room.active for room in rooms.values()):
+        reachability['checked'] = now
+        reachability['task'] = asyncio.create_task(run_probe())
+    return reachability['state'] if KEY else 'unconfigured'
+
+
 @app.get('/api/health')
-def health():
-    return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
+async def health():
+    return {'ok': True, 'translation_provider': PROVIDER.name, 'translation_configured': bool(KEY),
+            'translation_reachable': check_reachability(), 'transcription': 'configured' if TRANSCRIPTION_MODEL else 'unavailable',
             'noise_reduction': {'translation': TRANSLATE_NOISE_REDUCTION or 'off'},
             'limits': {'max_languages': MAX_LANGUAGES, 'max_broadcast_seconds': MAX_BROADCAST_SECONDS}}
 

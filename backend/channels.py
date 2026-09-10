@@ -21,6 +21,24 @@ def upstream_message(event):
     return str(error.get('message') or error.get('type') or 'unknown error')[:200]
 
 
+async def probe(url, headers, timeout, language='en'):
+    """Open and close a translation session to see whether the provider answers at all.
+
+    Nothing but the handshake happens, so this checks the route, the key and the model without
+    sending any audio. Raises whatever went wrong; the caller decides what to tell the user."""
+    async with asyncio.timeout(timeout):
+        async with websockets.connect(url, additional_headers=headers, proxy=None,
+                                      open_timeout=timeout, close_timeout=2, max_size=65536) as ws:
+            await ws.send(json.dumps({'type': 'session.update',
+                                      'session': {'audio': {'output': {'language': language}}}}))
+            while True:
+                event = json.loads(await ws.recv())
+                if event.get('type') == 'error':
+                    raise RuntimeError('Translation probe rejected: ' + upstream_message(event))
+                if event.get('type') == 'session.updated':
+                    return
+
+
 class TranslationChannel:
     def __init__(self, language, url, key, publish, noise_reduction=None, transcribe=None, headers=None):
         self.language = language

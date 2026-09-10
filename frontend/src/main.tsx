@@ -483,6 +483,8 @@ function App() {
   const [audioInfo, setAudioInfo] = useState({ chunks: 0, peak: 0, state: "nicht gestartet" });
   const [toneResult, setToneResult] = useState("");
   const [transcription, setTranscription] = useState("loading");
+  /* Erreichbarkeit des Übersetzungsdienstes laut /api/health: unknown, ok, unreachable, unconfigured. */
+  const [reachable, setReachable] = useState("unknown");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]),
     [device, setDevice] = useState("");
   /* Rauschunterdrückung der Übersetzung: Wahl des Sprechers, sonst der Serverstandard aus /api/health. */
@@ -538,13 +540,19 @@ function App() {
     const key = backendErrors[event.code];
     return key ? t(key, { max: String(event.max ?? "") }) : event.message;
   };
-  useEffect(() => {
-    fetch("/api/health")
+  function readHealth() {
+    return fetch("/api/health")
       .then((r) => r.json())
       .then((x) => {
         setTranscription(x.transcription);
-        if (x.noise_reduction?.translation) setNoiseDefault(x.noise_reduction.translation);
+        setReachable(x.translation_reachable ?? "unknown");
+        return x;
       });
+  }
+  useEffect(() => {
+    readHealth().then((x) => {
+      if (x.noise_reduction?.translation) setNoiseDefault(x.noise_reduction.translation);
+    });
     if (room)
       fetch("/api/rooms/" + room)
         .then(async (r) => {
@@ -560,14 +568,7 @@ function App() {
         .catch((e) => setError(e.message));
   }, []);
   useEffect(() => {
-    const timer = setInterval(
-      () =>
-        fetch("/api/health")
-          .then((r) => r.json())
-          .then((x) => setTranscription(x.transcription))
-          .catch(() => {}),
-      10000,
-    );
+    const timer = setInterval(() => readHealth().catch(() => {}), 10000);
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
@@ -1121,7 +1122,9 @@ function App() {
         ? ["channelsFailed", channels.failed.map((code) => languages[code] || code).join(", ")]
         : connectSlow
           ? ["channelsConnecting", ""]
-          : null;
+          : !channels.total && reachable === "unreachable"
+            ? ["providerUnreachableRoom", ""]
+            : null;
   const channelAlert = channelState ? (
     <div className={channels.failed.length ? "alert" : "notice"} role={channels.failed.length ? "alert" : "status"}>
       <AlertCircle size={18} aria-hidden="true" />
@@ -1220,6 +1223,12 @@ function App() {
                   {targetLang}
                 </button>
               </div>
+              {reachable === "unreachable" && (
+                <div className="notice" role="status">
+                  <Info size={18} aria-hidden="true" />
+                  <span>{t("providerUnreachable")}</span>
+                </div>
+              )}
               <form className="join" onSubmit={(e) => { e.preventDefault(); prepareSession(); }} aria-busy={preparing}>
                 <label className="field-label" htmlFor="speaker-pin">{t("speakerPin")}</label>
                 <input id="speaker-pin" type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4}
@@ -1501,7 +1510,7 @@ function App() {
               <VoiceLine values={IDLE_VOICE} />
             </div>
             <div className="choices">
-              <button className="choice" onClick={() => setSheet("prepare")}>
+              <button className="choice" onClick={() => { setSheet("prepare"); readHealth().catch(() => {}); }}>
                 <Mic size={28} aria-hidden="true" />
                 <span className="choice-text">
                   <strong>{t("homeSpeak")}</strong>
