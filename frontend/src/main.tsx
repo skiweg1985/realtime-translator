@@ -472,6 +472,9 @@ function App() {
     [notice, setNotice] = useState("");
   const [count, setCount] = useState(0),
     [copied, setCopied] = useState(false);
+  /* Sprecher: Zielsprachen, deren Übersetzung gerade ausgefallen ist. */
+  const [failed, setFailed] = useState<string[]>([]),
+    [channelCount, setChannelCount] = useState(0);
   const [muted, setMuted] = useState(false),
     [micMuted, setMicMuted] = useState(false),
     [elapsed, setElapsed] = useState(0);
@@ -521,6 +524,18 @@ function App() {
     wake = useRef<any>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
   const t = (key: Key, vars?: Record<string, string>) => translate(ui, key, vars);
+  /* Das Backend schickt einen Code mit; nur unbekannte Codes zeigen seinen deutschen Text. */
+  const backendErrors: Record<string, Key> = {
+    channel_unavailable: "errChannelUnavailable",
+    channel_slow: "errChannelSlow",
+    session_failed: "errSessionFailed",
+    speaker_rejected: "errSpeakerRejected",
+    too_many_languages: "errTooManyLanguages",
+  };
+  const describeEvent = (event: any) => {
+    const key = backendErrors[event.code];
+    return key ? t(key, { max: String(event.max ?? "") }) : event.message;
+  };
   useEffect(() => {
     fetch("/api/health")
       .then((r) => r.json())
@@ -767,6 +782,7 @@ function App() {
   async function start() {
     setError("");
     setNotice("");
+    setFailed([]);
     setElapsed(0);
     applyStatus("connecting");
     if (listener) {
@@ -829,7 +845,7 @@ function App() {
           setLanguage(selectedLanguage.current);
           setText(event.text || "");
           applyStatus(event.status || "waiting");
-          setError(event.message);
+          setError(describeEvent(event));
           return;
         }
         if (listener && event.language && (event.language !== selectedLanguage.current || event.subscription !== subscription.current)) return;
@@ -879,12 +895,17 @@ function App() {
             };
           }
           if (event.status === "ended") stopMic();
+          if (!listener && ["ended", "closed"].includes(event.status)) setFailed([]);
         }
         if (event.type === "translation") setText(event.text);
         if (event.type === "original") setOriginal(event.text);
         if (event.type === "listeners") setCount(event.count);
         if (event.type === "audio" && listener) play(event.delta);
-        if (event.type === "error") setError(event.message);
+        if (event.type === "channels") {
+          setFailed(event.failed);
+          setChannelCount(event.total);
+        }
+        if (event.type === "error") setError(describeEvent(event));
         if (event.type === "notice") setNotice(event.message);
       };
       ws.onerror = () => {
@@ -1054,7 +1075,18 @@ function App() {
         ? ["standbyPausedTitle", "standbyPausedText"]
         : status === "closed"
           ? ["standbyClosedTitle", "standbyClosedText"]
-          : null;
+          : status === "error"
+            ? ["standbyErrorTitle", "standbyErrorText"]
+            : null;
+  /* Im Ausfall trägt der Standby-Block die Meldung, damit sie nicht zweimal dasteht. */
+  const outage = listener && status === "error";
+  /* Erneut dieselbe Sprache abonnieren: das Backend baut den ausgefallenen Kanal dabei neu auf. */
+  const retryButton =
+    outage ? (
+      <button className="btn btn-secondary standby-action" onClick={() => chooseLanguage(selectedLanguage.current)}>
+        {t("retryLanguage")}
+      </button>
+    ) : null;
   const transcript = listener ? text : original;
   const deviceLabel =
     devices.find((d) => d.deviceId === device)?.label || t("micDefault");
@@ -1072,9 +1104,22 @@ function App() {
       <Settings2 size={22} />
     </button>
   );
+  /* Bleibt stehen, solange die Übersetzung ausgefallen ist, und verschwindet von selbst. */
+  const channelAlert =
+    !listener && failed.length > 0 ? (
+      <div className="alert" role="alert">
+        <AlertCircle size={18} aria-hidden="true" />
+        <span>
+          {failed.length >= channelCount
+            ? t("channelsAllFailed")
+            : t("channelsFailed", { langs: failed.map((code) => languages[code] || code).join(", ") })}
+        </span>
+      </div>
+    ) : null;
   const alerts = (
     <>
-      {error && (
+      {channelAlert}
+      {error && !outage && (
         <div className="alert" role="alert">
           <AlertCircle size={18} aria-hidden="true" />
           <span>{error}</span>
@@ -1549,7 +1594,8 @@ function App() {
                 {standby ? (
                   <div className={"standby centered " + status} role="status">
                     <strong>{t(standby[0])}</strong>
-                    <span>{t(standby[1])}</span>
+                    <span>{outage && error ? error : t(standby[1])}</span>
+                    {retryButton}
                   </div>
                 ) : (
                   <p className="status-line">{stateLabel[status]}</p>
@@ -1570,7 +1616,8 @@ function App() {
           {standby && mode !== "audio" && (
             <div className={"standby " + status} role="status">
               <strong>{t(standby[0])}</strong>
-              <span>{t(standby[1])}</span>
+              <span>{outage && error ? error : t(standby[1])}</span>
+              {retryButton}
             </div>
           )}
           {showText && transcript && (
