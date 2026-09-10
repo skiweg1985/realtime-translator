@@ -9,8 +9,12 @@ import websockets
 
 log = logging.getLogger(__name__)
 
-# A dropped upstream is usually short-lived, so try twice more before giving up on the language.
+# A dropped upstream is usually short-lived, so try twice more before the language counts as failed.
 RETRY_DELAYS = (1, 3)
+# After that the failure is reported, but the channel keeps trying at this pace and finally once a
+# minute. An outage of a few minutes must not cost the rest of the session, and a provider that is
+# down must not be hammered: this is one attempt per language, however many listeners are waiting.
+RECOVERY_DELAYS = (15, 30, 60)
 # A realtime service that needs longer than this for the handshake is unusable anyway, and every
 # second here is spent three times over before the speaker learns that nothing is being translated.
 OPEN_TIMEOUT = 8
@@ -55,6 +59,11 @@ class TranslationChannel:
         self.task = None
         # Set as soon as the drain frame is queued; from then on a broken upstream is not retried.
         self.finishing = False
+        # A reported outage. Unlike status it stays true across further attempts until one succeeds,
+        # so the speaker keeps the warning while a retry is still connecting.
+        self.failed = False
+        # Cuts the wait between attempts short when a listener or the speaker asks for a retry.
+        self.wake = asyncio.Event()
 
     def start(self):
         self.task = asyncio.create_task(self.run())
@@ -67,8 +76,8 @@ class TranslationChannel:
         try:
             self.queue.put_nowait(pcm)
         except asyncio.QueueFull:
-            if self.status == 'connecting':
-                # Nothing is reading while we reconnect, and stale audio is worthless anyway.
+            if self.status != 'live':
+                # Nothing is reading while we connect, and stale audio is worthless anyway.
                 with contextlib.suppress(asyncio.QueueEmpty):
                     self.queue.get_nowait()
                 self.queue.put_nowait(pcm)
@@ -83,9 +92,26 @@ class TranslationChannel:
         self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
 
+    def retry_now(self):
+        """Ask for the next attempt right away instead of waiting out the current delay."""
+        self.wake.set()
+
+    async def wait(self, delay):
+        self.wake.clear()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.wake.wait(), delay)
+
+    def delays(self):
+        """One wait per further attempt; the channel never stops trying while the room wants it."""
+        yield from RETRY_DELAYS
+        yield from RECOVERY_DELAYS
+        while True:
+            yield RECOVERY_DELAYS[-1]
+
     async def run(self):
-        """Try the upstream a few times; only a lasting failure reaches the room."""
-        for delay in (*RETRY_DELAYS, None):
+        """Keep the language usable: quick retries first, then a reported outage that heals itself."""
+        attempt, schedule = 0, self.delays()
+        while True:
             try:
                 await self.session()
                 self.status = 'ended'
@@ -93,19 +119,40 @@ class TranslationChannel:
                 return
             except Exception as exc:
                 failure = exc
-            if delay is None or self.finishing:
+            if self.finishing:
                 break
-            log.warning('Translation channel %s reconnects in %ss: %s', self.language, delay, failure)
+            if self.status == 'live':
+                # The upstream worked and then dropped, so this is a fresh outage: start over with
+                # the quick retries, and let a lasting one be reported again.
+                attempt, schedule = 0, self.delays()
+            delay = next(schedule)
+            if attempt == len(RETRY_DELAYS):
+                await self.report_failure(failure)
+            else:
+                log.warning('Translation channel %s retries in %ss: %s', self.language, delay, failure)
+                if self.failed:
+                    # Back from the attempt to the outage: listeners must not read 'connecting'
+                    # through minutes of waiting.
+                    self.status = 'error'
+                    await self.publish({'type': 'status', 'status': 'error'})
+            attempt += 1
+            await self.wait(delay)
+            # Listeners see 'connecting' for the attempt itself, not for the wait before it.
             self.status = 'connecting'
-            # The reconnected upstream starts a new sentence after the text so far.
+            # The next upstream starts a new sentence after the text so far.
             self.spoke = False
             await self.publish({'type': 'status', 'status': 'connecting'})
-            await asyncio.sleep(delay)
+        if not self.failed:
+            await self.report_failure(failure)
+
+    async def report_failure(self, failure):
+        """Say once that the language is down. Further attempts keep running in the background."""
         log.warning('Translation channel %s failed: %s', self.language, failure)
+        self.failed = True
         self.status = 'error'
         await self.publish({'type': 'status', 'status': 'error'})
         await self.publish({'type': 'error', 'code': 'channel_unavailable',
-                            'message': 'Diese Übersetzung ist momentan nicht verfügbar. Bitte erneut verbinden oder eine andere Sprache wählen.'})
+                            'message': 'Diese Übersetzung ist momentan nicht verfügbar. Es wird weiter versucht.'})
 
     async def session(self):
         async with websockets.connect(self.url, additional_headers=self.headers,
@@ -132,6 +179,7 @@ class TranslationChannel:
             if self.finishing:
                 self.queue.put_nowait(None)
             self.status = 'live'
+            self.failed = False
             await self.publish({'type': 'status', 'status': 'live'})
 
             async def receive():

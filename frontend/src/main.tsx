@@ -636,6 +636,8 @@ function App() {
     Math.floor(elapsed / 60) + ":" + String(elapsed % 60).padStart(2, "0");
   const languagesLocked = !listener && !!room;
   function applyStatus(next: Status) {
+    /* Der Kanal versucht es weiter. Sobald er den Fehlerzustand verlässt, gilt die Meldung nicht mehr. */
+    if (statusRef.current === "error" && next !== "error") setError("");
     statusRef.current = next;
     setStatus(next);
   }
@@ -954,6 +956,11 @@ function App() {
       socket.current?.send("stop");
     }
   }
+  /* Nächsten Verbindungsversuch für alle ausgefallenen Sprachen vorziehen. */
+  function retryChannels() {
+    if (socket.current?.readyState === WebSocket.OPEN)
+      socket.current.send(JSON.stringify({ type: "retry" }));
+  }
   /* Rauschunterdrückung auch mitten in der Sitzung: das Backend baut die Kanäle in der nächsten Pause neu auf. */
   function chooseNoise(value: string) {
     setNoise(value);
@@ -1129,6 +1136,9 @@ function App() {
     <div className={channels.failed.length ? "alert" : "notice"} role={channels.failed.length ? "alert" : "status"}>
       <AlertCircle size={18} aria-hidden="true" />
       <span>{t(channelState[0], { langs: channelState[1] })}</span>
+      {channels.failed.length > 0 && (
+        <button className="textbutton alert-action" onClick={retryChannels}>{t("retryNow")}</button>
+      )}
     </div>
   ) : null;
   const alerts = (
