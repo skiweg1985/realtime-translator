@@ -58,10 +58,16 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         self.room.peers.add(peer)
         return peer
 
-    async def fail(self, language):
+    async def set_channel(self, language, status):
         channel = self.room.channels[language]
-        channel.status = 'error'
-        await channel.publish({'type': 'status', 'status': 'error'})
+        channel.status = status
+        await channel.publish({'type': 'status', 'status': status})
+
+    def last_report(self, speaker):
+        report = None
+        while not speaker.queue.empty():
+            report = speaker.queue.get_nowait()
+        return report
 
     async def test_same_language_shares_one_channel_and_events_are_scoped(self):
         a = await self.join('en');b = await self.join('en');c = await self.join('fr')
@@ -75,26 +81,41 @@ class Channels(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(a.queue.empty())
         self.assertEqual(c.queue.get_nowait()['type'],'error')
 
+    async def test_speaker_sees_a_channel_that_has_not_come_up_yet(self):
+        """A slow handshake looks exactly like a working session without this report."""
+        speaker = await self.speaker()
+        await self.join('fr')
+        await self.set_channel('fr', 'connecting')
+        self.assertEqual(self.last_report(speaker),
+                         {'type': 'channels', 'failed': [], 'live': 0, 'total': 1})
+        await self.set_channel('fr', 'live')
+        self.assertEqual(self.last_report(speaker),
+                         {'type': 'channels', 'failed': [], 'live': 1, 'total': 1})
+
     async def test_speaker_learns_which_languages_stopped_translating(self):
         speaker = await self.speaker()
         await self.join('fr')
         main.ensure_channel(self.room, 'en')  # carries the original captions while speaking
-        await self.fail('fr')
-        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': ['fr'], 'total': 2})
-        await self.fail('fr')  # an unchanged state stays quiet
+        self.last_report(speaker)
+        await self.set_channel('fr', 'error')
+        self.assertEqual(self.last_report(speaker),
+                         {'type': 'channels', 'failed': ['fr'], 'live': 1, 'total': 2})
+        await self.set_channel('fr', 'error')  # an unchanged state stays quiet
         self.assertTrue(speaker.queue.empty())
-        await self.fail('en')
-        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': ['en', 'fr'], 'total': 2})
+        await self.set_channel('en', 'error')
+        self.assertEqual(self.last_report(speaker),
+                         {'type': 'channels', 'failed': ['en', 'fr'], 'live': 0, 'total': 2})
 
     async def test_a_retried_language_clears_the_speakers_warning(self):
         speaker = await self.speaker()
         listener = await self.join('fr')
-        await self.fail('fr')
-        self.assertEqual(speaker.queue.get_nowait()['failed'], ['fr'])
+        await self.set_channel('fr', 'error')
+        self.assertEqual(self.last_report(speaker)['failed'], ['fr'])
         self.room.channels['fr'].task.cancel()
         await asyncio.gather(self.room.channels['fr'].task, return_exceptions=True)
         self.assertTrue(await main.subscribe(self.room, listener, 'fr', 2))
-        self.assertEqual(speaker.queue.get_nowait(), {'type': 'channels', 'failed': [], 'total': 1})
+        self.assertEqual(speaker.queue.get_nowait(),
+                         {'type': 'channels', 'failed': [], 'live': 1, 'total': 1})
 
     async def test_four_languages_limit_preserves_existing_subscription(self):
         peers = [await self.join(l) for l in ['en','fr','es','it']]
